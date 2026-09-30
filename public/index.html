@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wuxia Warriors</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1a0a2e;
+      color: #f0d080;
+      font-family: 'Georgia', serif;
+      overflow: hidden;
+    }
+
+    /* ── Lobby ─────────────────────────── */
+    #lobby {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      gap: 16px;
+    }
+    #lobby h1 { font-size: 3rem; color: #f0a040; text-shadow: 0 0 20px #f0a04088; }
+    #lobby p.sub { font-size: 1.1rem; color: #c0a060; margin-bottom: 12px; }
+    #lobby input, #lobby select {
+      padding: 10px 18px;
+      font-size: 1rem;
+      border-radius: 6px;
+      border: 1px solid #f0a040;
+      background: #2a1050;
+      color: #f0d080;
+      width: 260px;
+    }
+    #lobby button {
+      padding: 12px 32px;
+      font-size: 1.1rem;
+      background: #c0392b;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-family: inherit;
+      letter-spacing: 1px;
+      transition: background 0.2s;
+    }
+    #lobby button:hover { background: #e74c3c; }
+    #player-list { font-size: 0.95rem; color: #a080c0; }
+
+    /* ── Game canvas ───────────────────── */
+    #game { display: none; position: relative; }
+    #gameCanvas { display: block; }
+
+    /* ── HUD ───────────────────────────── */
+    #hud {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      display: none;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 16px;
+      background: rgba(10,0,30,0.8);
+      border-bottom: 1px solid #f0a04044;
+      z-index: 10;
+    }
+    #turn-info { font-size: 1.1rem; color: #f0d080; }
+    #spell-bar { display: flex; gap: 8px; }
+    .spell-btn {
+      padding: 6px 14px;
+      border: 1px solid #f0a040;
+      background: rgba(240,160,64,0.15);
+      color: #f0d080;
+      cursor: pointer;
+      border-radius: 4px;
+      font-size: 0.85rem;
+      font-family: inherit;
+      transition: background 0.15s;
+    }
+    .spell-btn:hover, .spell-btn.active { background: rgba(240,160,64,0.4); }
+    #power-display { font-size: 0.9rem; color: #80c0ff; }
+
+    /* ── HP bars overlay ───────────────── */
+    #hp-bars {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      display: none;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 8px 12px;
+      background: rgba(10,0,30,0.8);
+      border-top: 1px solid #f0a04044;
+      z-index: 10;
+    }
+    .hp-entry { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; }
+    .hp-bar-bg { width: 80px; height: 8px; background: #333; border-radius: 4px; }
+    .hp-bar-fill { height: 100%; border-radius: 4px; transition: width 0.4s; }
+
+    /* ── Aim indicator ─────────────────── */
+    #aim-controls {
+      position: fixed;
+      right: 16px;
+      top: 50%;
+      transform: translateY(-50%);
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      z-index: 10;
+      background: rgba(10,0,30,0.8);
+      padding: 12px;
+      border-radius: 8px;
+      border: 1px solid #f0a04044;
+    }
+    #aim-controls label { font-size: 0.8rem; color: #c0a060; }
+    #angle-range, #power-range { width: 120px; accent-color: #f0a040; }
+    #fire-btn {
+      padding: 10px 24px;
+      background: #c0392b;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 1rem;
+      font-family: inherit;
+      margin-top: 4px;
+    }
+    #fire-btn:hover { background: #e74c3c; }
+
+    /* ── Chat/log ──────────────────────── */
+    #log {
+      position: fixed;
+      left: 8px;
+      bottom: 60px;
+      width: 260px;
+      max-height: 140px;
+      overflow-y: auto;
+      font-size: 0.78rem;
+      color: #a0c0e0;
+      z-index: 10;
+      display: none;
+    }
+    .log-line { padding: 1px 0; border-bottom: 1px solid #ffffff11; }
+
+    /* ── Game over ─────────────────────── */
+    #gameover {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.75);
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+    #gameover-box {
+      background: #1a0a2e;
+      border: 2px solid #f0a040;
+      border-radius: 12px;
+      padding: 40px 60px;
+      text-align: center;
+    }
+    #gameover-box h2 { font-size: 2rem; color: #f0a040; margin-bottom: 8px; }
+    #gameover-box p { color: #c0a060; margin-bottom: 20px; }
+    #gameover-box button {
+      padding: 10px 28px;
+      background: #c0392b;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 1rem;
+    }
+  </style>
+</head>
+<body>
+
+<!-- ── LOBBY ─────────────────────────────────────── -->
+<div id="lobby">
+  <h1>⚔ Wuxia Warriors</h1>
+  <p class="sub">Turn-based artillery — Wuxia style</p>
+  <input id="name-input" type="text" placeholder="Your warrior name" maxlength="20">
+  <input id="room-input" type="text" placeholder="Room code (share with friends)" maxlength="12" value="jade-mountain">
+  <select id="char-select">
+    <option value="0">Monk</option>
+    <option value="1">Geisha</option>
+    <option value="2">Lucky Cat</option>
+    <option value="3">Warrior</option>
+  </select>
+  <button id="join-btn">Enter the Arena</button>
+  <div id="player-list"></div>
+  <button id="start-btn" style="display:none;background:#27ae60">Start Game ▶</button>
+</div>
+
+<!-- ── HUD ───────────────────────────────────────── -->
+<div id="hud">
+  <div id="turn-info">Waiting…</div>
+  <div id="spell-bar">
+    <button class="spell-btn active" data-spell="dragon_blast">🐉 Dragon Blast</button>
+    <button class="spell-btn" data-spell="tidal_wave">🌊 Tidal Wave</button>
+    <button class="spell-btn" data-spell="thunder_strike">⚡ Thunder Strike</button>
+    <button class="spell-btn" data-spell="wind_slash">💨 Wind Slash</button>
+  </div>
+  <div id="power-display">Power: 50 | Angle: -45°</div>
+</div>
+
+<!-- ── GAME CANVAS ───────────────────────────────── -->
+<div id="game">
+  <canvas id="gameCanvas"></canvas>
+</div>
+
+<!-- ── AIM CONTROLS ──────────────────────────────── -->
+<div id="aim-controls">
+  <label>Angle</label>
+  <input type="range" id="angle-range" min="-85" max="0" value="-45">
+  <label>Power</label>
+  <input type="range" id="power-range" min="10" max="100" value="50">
+  <button id="fire-btn">🔥 Fire!</button>
+  <small style="color:#806080;font-size:0.75rem">← → Move &nbsp; A/D aim</small>
+</div>
+
+<!-- ── HP BARS ───────────────────────────────────── -->
+<div id="hp-bars"></div>
+
+<!-- ── LOG ───────────────────────────────────────── -->
+<div id="log"></div>
+
+<!-- ── GAME OVER ─────────────────────────────────── -->
+<div id="gameover">
+  <div id="gameover-box">
+    <h2>⚔ Battle Over!</h2>
+    <p id="gameover-msg"></p>
+    <button onclick="location.reload()">Play Again</button>
+  </div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script src="game.js"></script>
+</body>
+</html>
