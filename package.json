@@ -1,5 +1,5 @@
 {
-  "name": "wuxia-warriors",
+  "name": "daoist-duels",
   "version": "1.0.0",
   "description": "Wuxia-themed turn-based artillery game",
   "main": "server/server.js",
