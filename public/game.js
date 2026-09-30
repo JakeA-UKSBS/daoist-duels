@@ -26,6 +26,26 @@ let moveInterval = null;
 // Projectile animation
 let projAnim = null;
 
+// ── Art ───────────────────────────────────────────────────────────────────────
+const PLAYER_H = 64;   // sprite height in world px; body centre is PLAYER_H/2 above feet
+const CHAR_SPRITES = ['cultivator', 'sage', 'geisha', 'lucky_cat'].map(n => {
+  const img = new Image();
+  img.src = `/assets/characters/${n}.png`;
+  img.onload = () => render();
+  return img;
+});
+const bgCache = {};
+function bgImage(src) {
+  if (!src) return null;
+  if (!bgCache[src]) {
+    const img = new Image();
+    img.src = src;
+    img.onload = () => render();
+    bgCache[src] = img;
+  }
+  return bgCache[src].complete && bgCache[src].naturalWidth ? bgCache[src] : null;
+}
+
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const lobbyEl    = document.getElementById('lobby');
 const gameEl     = document.getElementById('game');
@@ -53,22 +73,26 @@ resize();
 document.getElementById('join-btn').addEventListener('click', () => {
   const name = document.getElementById('name-input').value.trim() || 'Warrior';
   const roomId = document.getElementById('room-input').value.trim() || 'default';
-  socket.emit('join_room', { roomId, name });
+  const charIndex = Number(document.getElementById('char-select').value);
+  socket.emit('join_room', { roomId, name, charIndex });
 });
-startBtn.addEventListener('click', () => socket.emit('start_game'));
+startBtn.addEventListener('click', () => {
+  socket.emit('start_game', { map: document.getElementById('map-select').value });
+});
 
 // ── Socket events ─────────────────────────────────────────────────────────────
 socket.on('joined', ({ playerId, room: r }) => {
   myId = playerId;
   room = r;
   updateLobbyList();
-  if (room.players[0]?.id === myId) startBtn.style.display = 'block';
+  document.getElementById('join-btn').style.display = 'none';
+  if (room.players[0]?.id === myId) document.getElementById('map-row').style.display = 'block';
   log(`Joined room "${r.id}" — share this code with friends!`);
 });
 
-socket.on('player_joined', ({ player }) => {
+socket.on('player_joined', ({ player, players }) => {
   if (!room) return;
-  room.players.push(player);
+  room.players = players;
   updateLobbyList();
   log(`${player.name} joined the arena`);
 });
@@ -87,9 +111,16 @@ socket.on('game_started', ({ room: r }) => {
   enterGame();
 });
 
-socket.on('player_moved', ({ id, x, y, facing }) => {
+socket.on('player_moved', ({ id, x, y, facing, hp }) => {
   const p = room?.players.find(p => p.id === id);
-  if (p) { p.x = x; p.y = y; p.facing = facing; }
+  if (p) {
+    p.x = x; p.y = y; p.facing = facing;
+    if (hp !== undefined && hp !== p.hp) {
+      p.hp = hp;
+      if (hp <= 0) log(`${p.name} fell into the abyss!`);
+      renderHpBars();
+    }
+  }
   render();
 });
 
@@ -99,19 +130,24 @@ socket.on('player_aimed', ({ id, angle, power }) => {
   render();
 });
 
-socket.on('projectile_result', ({ path, landX, landY, spell, radius, terrain, players }) => {
-  if (room) {
+socket.on('projectile_result', ({ path, landX, landY, spell, radius, hits, fallen, terrain, players }) => {
+  stopMoving();
+  // Apply the result only once the projectile lands, so the crater/knockback
+  // appear with the explosion rather than before it
+  const apply = () => {
+    if (!room) return;
     room.terrain = terrain;
-    players.forEach(({ id, hp }) => {
-      const p = room.players.find(p => p.id === id);
-      if (p) p.hp = hp;
+    players.forEach(u => {
+      const p = room.players.find(p => p.id === u.id);
+      if (p) Object.assign(p, u);
     });
-    // After explosion, snap all players to new terrain surface
-    room.players.forEach(p => {
-      p.y = terrainYAt(p.x) - 1;
-    });
-  }
-  projAnim = { path, idx: 0, landX, landY, spell, radius, onDone: () => { projAnim = null; renderHpBars(); render(); } };
+    const label = room.spells?.[spell]?.label || spell;
+    if (hits?.length) hits.forEach(h => log(`${label} hits ${h.name} for ${h.dmg}`));
+    else log(`${label} misses`);
+    (fallen || []).forEach(n => log(`${n} fell into the abyss!`));
+    renderHpBars();
+  };
+  projAnim = { path, idx: 0, landX, landY, spell, radius, apply, onDone: () => { projAnim = null; render(); } };
   animateProjectile();
 });
 
@@ -211,7 +247,7 @@ canvas.addEventListener('mousemove', e => {
 
   // Angle from player to mouse
   const dx = mouseWorld.x - me.x;
-  const dy = mouseWorld.y - (me.y - 20); // aim from centre of player
+  const dy = mouseWorld.y - (me.y - PLAYER_H / 2); // aim from centre of player
   aimAngle = Math.atan2(dy, dx) * 180 / Math.PI;
 
   // Clamp: can't aim straight down or behind — keep to front hemisphere
@@ -219,6 +255,7 @@ canvas.addEventListener('mousemove', e => {
   // Power: distance mapped 50–400px → 10–100
   const dist = Math.sqrt(dx * dx + dy * dy);
   aimPower = Math.round(Math.max(10, Math.min(100, (dist / 400) * 100)));
+  me.facing = dx >= 0 ? 1 : -1;
 
   powerDisp.textContent = `Power: ${aimPower} | Angle: ${Math.round(aimAngle)}°`;
 
@@ -271,6 +308,7 @@ document.querySelectorAll('.spell-btn').forEach(btn => {
     document.querySelectorAll('.spell-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     selectedSpell = btn.dataset.spell;
+    render();
   });
 });
 
@@ -309,8 +347,9 @@ function clampCamera() {
   const { worldW, worldH } = room.terrain;
   const vw = canvas.width / cam.zoom;
   const vh = canvas.height / cam.zoom;
-  cam.x = Math.max(0, Math.min(Math.max(0, worldW - vw), cam.x));
-  cam.y = Math.max(0, Math.min(Math.max(0, worldH - vh), cam.y));
+  // Centre the world if it's smaller than the screen, otherwise keep it in view
+  cam.x = worldW <= vw ? (worldW - vw) / 2 : Math.max(0, Math.min(worldW - vw, cam.x));
+  cam.y = worldH <= vh ? (worldH - vh) / 2 : Math.max(0, Math.min(worldH - vh, cam.y));
 }
 
 function centreOnMe() {
@@ -343,7 +382,13 @@ function render() {
   ctx.scale(cam.zoom, cam.zoom);
   ctx.translate(-cam.x, -cam.y);
 
-  drawTerrain(worldW, worldH, heights, segments);
+  const bg = bgImage(room.terrain.bg);
+  if (bg) {
+    ctx.drawImage(bg, 0, 0, worldW, worldH);
+    drawCraters(worldW, worldH, heights, segments, room.terrain.base);
+  } else {
+    drawTerrain(worldW, worldH, heights, segments);
+  }
 
   room.players.forEach(p => drawPlayer(p));
 
@@ -353,23 +398,24 @@ function render() {
     if (me) drawAimIndicator(me);
   }
 
-  // Projectile
-  if (projAnim) {
-    const pt = projAnim.path[Math.min(projAnim.idx, projAnim.path.length - 1)];
+  // Projectile + fading trail
+  if (projAnim && !projAnim.showBlast) {
+    const i = Math.min(projAnim.idx, projAnim.path.length - 1);
+    const col = spellColor(projAnim.spell);
+    for (let k = Math.max(0, i - 12); k < i; k++) {
+      const q = projAnim.path[k];
+      ctx.globalAlpha = (k - (i - 12)) / 16;
+      ctx.beginPath();
+      ctx.arc(q.x, q.y, 3 + (k - (i - 12)) * 0.4, 0, Math.PI * 2);
+      ctx.fillStyle = col;
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    const pt = projAnim.path[i];
     if (pt) drawProjectile(pt.x, pt.y, projAnim.spell);
   }
 
-  // Explosion flash
-  if (projAnim && projAnim.showBlast) {
-    const g = ctx.createRadialGradient(projAnim.landX, projAnim.landY, 0, projAnim.landX, projAnim.landY, projAnim.radius * 1.5);
-    g.addColorStop(0, 'rgba(255,220,80,0.9)');
-    g.addColorStop(0.4, 'rgba(255,100,20,0.6)');
-    g.addColorStop(1, 'rgba(255,60,0,0)');
-    ctx.beginPath();
-    ctx.arc(projAnim.landX, projAnim.landY, projAnim.radius * 1.5, 0, Math.PI * 2);
-    ctx.fillStyle = g;
-    ctx.fill();
-  }
+  if (projAnim && projAnim.showBlast) drawBlast(projAnim);
 
   ctx.restore();
 
@@ -378,8 +424,41 @@ function render() {
     ctx.fillStyle = 'rgba(240,208,128,0.7)';
     ctx.font = '13px Georgia';
     ctx.textAlign = 'left';
-    ctx.fillText('A/D or ←/→ to walk  ·  Move mouse to aim  ·  Click to fire', 12, canvas.height - 12);
+    ctx.fillText('A/D or ←/→ to walk  ·  Move mouse to aim  ·  Click to fire  ·  Right-drag to pan  ·  Wheel to zoom', 12, canvas.height - 12);
   }
+}
+
+// Image maps: the painted ground stays as-is; blasted-out areas are drawn as dark earth
+function drawCraters(worldW, worldH, heights, segments, base) {
+  if (!base) return;
+  const step = worldW / segments;
+  ctx.beginPath();
+  for (let i = 0; i <= segments; i++) ctx.lineTo(i * step, base[i]);
+  for (let i = segments; i >= 0; i--) ctx.lineTo(i * step, heights[i]);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(0, 850, 0, worldH);
+  g.addColorStop(0, '#6b5238');
+  g.addColorStop(1, '#2a1c10');
+  ctx.fillStyle = g;
+  ctx.fill();
+
+  // Abyss where the ground has been blasted right through
+  for (let i = 0; i < segments; i++) {
+    if (heights[i] >= worldH - 4 && heights[i + 1] >= worldH - 4) {
+      ctx.fillStyle = '#0a0612';
+      ctx.fillRect(i * step, worldH - 30, step + 1, 30);
+    }
+  }
+
+  // Dark rim along the carved surface
+  ctx.beginPath();
+  for (let i = 0; i <= segments; i++) {
+    const y = heights[i];
+    if (y > base[i] + 1) ctx.lineTo(i * step, y); else ctx.moveTo(i * step, y);
+  }
+  ctx.strokeStyle = '#3d2a18';
+  ctx.lineWidth = 3;
+  ctx.stroke();
 }
 
 function drawTerrain(worldW, worldH, heights, segments) {
@@ -437,64 +516,65 @@ function drawPlayer(p) {
 
   ctx.globalAlpha = alive ? 1 : 0.3;
 
-  // Body (centred at y-20 above feet)
-  const cy = y - 22;
+  const cy = y - PLAYER_H / 2;
 
   // Shadow ellipse on ground
   ctx.beginPath();
-  ctx.ellipse(x, y - 2, 16, 5, 0, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.ellipse(x, y - 1, 18, 5, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
   ctx.fill();
 
-  // Body circle
+  // Team colour disc under the feet
   ctx.beginPath();
-  ctx.arc(x, cy, 18, 0, Math.PI * 2);
+  ctx.ellipse(x, y, 14, 3.5, 0, 0, Math.PI * 2);
   ctx.fillStyle = p.color;
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-  ctx.lineWidth = 2;
-  ctx.stroke();
 
-  // Initial
-  ctx.fillStyle = '#fff';
-  ctx.font = `bold 15px Georgia`;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText((p.name[0] || '?').toUpperCase(), x, cy);
+  const img = CHAR_SPRITES[p.charIndex] || CHAR_SPRITES[0];
+  if (img.complete && img.naturalWidth) {
+    const h = PLAYER_H;
+    const w = h * img.naturalWidth / img.naturalHeight;
+    ctx.save();
+    ctx.translate(x, y);
+    if ((p.facing || 1) < 0) ctx.scale(-1, 1);
+    ctx.drawImage(img, -w / 2, -h, w, h);
+    ctx.restore();
+  } else {
+    ctx.beginPath();
+    ctx.arc(x, cy, 18, 0, Math.PI * 2);
+    ctx.fillStyle = p.color;
+    ctx.fill();
+  }
 
   // Current turn ring + arrow
+  const top = y - PLAYER_H;
   if (isCurrent && alive) {
-    ctx.beginPath();
-    ctx.arc(x, cy, 24, 0, Math.PI * 2);
-    ctx.strokeStyle = '#f0d080';
-    ctx.lineWidth = 2.5;
-    ctx.setLineDash([5, 4]);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
     // Bobbing arrow above
     const bob = Math.sin(Date.now() / 300) * 3;
     ctx.beginPath();
-    ctx.moveTo(x, cy - 38 - bob);
-    ctx.lineTo(x - 7, cy - 28 - bob);
-    ctx.lineTo(x + 7, cy - 28 - bob);
+    ctx.moveTo(x, top - 26 - bob);
+    ctx.lineTo(x - 7, top - 36 - bob);
+    ctx.lineTo(x + 7, top - 36 - bob);
     ctx.closePath();
     ctx.fillStyle = '#f0d080';
     ctx.fill();
   }
 
   // Name
-  ctx.font = '11px Georgia';
+  ctx.font = 'bold 12px Georgia';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'bottom';
-  ctx.fillStyle = isCurrent ? '#f0d080' : '#b0a060';
-  ctx.fillText(p.name, x, cy - 26);
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+  ctx.strokeText(p.name, x, top - 10);
+  ctx.fillStyle = p.color;
+  ctx.fillText(p.name, x, top - 10);
 
   // HP bar
   ctx.fillStyle = '#222';
-  ctx.fillRect(x - 20, cy - 38, 40, 5);
+  ctx.fillRect(x - 20, top - 8, 40, 5);
   ctx.fillStyle = hpColor(p.hp);
-  ctx.fillRect(x - 20, cy - 38, 40 * p.hp / 100, 5);
+  ctx.fillRect(x - 20, top - 8, 40 * p.hp / 100, 5);
 
   ctx.globalAlpha = 1;
 }
@@ -502,7 +582,7 @@ function drawPlayer(p) {
 function drawAimIndicator(me) {
   // Draw a dotted trajectory arc from player centre toward mouse
   const startX = me.x;
-  const startY = me.y - 22;
+  const startY = me.y - PLAYER_H / 2;
 
   // Arrow from player to mouse showing direction
   const dx = mouseWorld.x - startX;
@@ -513,8 +593,9 @@ function drawAimIndicator(me) {
   const angleRad = aimAngle * Math.PI / 180;
 
   // Simulated arc (dotted) using same physics as server
-  const speed = aimPower * 12;
-  const GRAVITY = 600;
+  const sp = room.spells?.[selectedSpell] || { speed: 1, gravity: 1 };
+  const speed = aimPower * 12 * sp.speed;
+  const GRAVITY = 600 * sp.gravity;
   const dt = 1 / 60;
   let px = startX, py = startY;
   let vx = Math.cos(angleRad) * speed;
@@ -558,14 +639,58 @@ function drawAimIndicator(me) {
   ctx.stroke();
 }
 
+function spellColor(spell) {
+  return room?.spells?.[spell]?.color || '#ffffff';
+}
+
+function drawBlast(a) {
+  const col = spellColor(a.spell);
+  const t = Math.min(1, (Date.now() - a.blastStart) / 500);   // 0 → 1 over the blast
+  const r = a.radius * (0.5 + 0.7 * t);
+
+  if (a.spell === 'thunder_strike') {
+    // Jagged bolt from the sky down to the impact point
+    ctx.beginPath();
+    let bx = a.landX, by = a.landY - 700;
+    ctx.moveTo(bx, by);
+    while (by < a.landY) {
+      by = Math.min(a.landY, by + 40 + Math.random() * 30);
+      bx = a.landX + (by < a.landY ? (Math.random() - 0.5) * 50 : 0);
+      ctx.lineTo(bx, by);
+    }
+    ctx.strokeStyle = `rgba(255,250,200,${1 - t})`;
+    ctx.lineWidth = 5;
+    ctx.stroke();
+    ctx.strokeStyle = `rgba(255,224,64,${0.6 * (1 - t)})`;
+    ctx.lineWidth = 14;
+    ctx.stroke();
+  }
+
+  if (a.spell === 'tidal_wave' || a.spell === 'wind_slash') {
+    // Expanding shockwave ring
+    ctx.beginPath();
+    ctx.ellipse(a.landX, a.landY, r, r * 0.45, 0, 0, Math.PI * 2);
+    ctx.strokeStyle = col;
+    ctx.globalAlpha = 1 - t;
+    ctx.lineWidth = 8 * (1 - t) + 2;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+
+  const g = ctx.createRadialGradient(a.landX, a.landY, 0, a.landX, a.landY, r);
+  g.addColorStop(0, `rgba(255,255,230,${0.9 * (1 - t)})`);
+  g.addColorStop(0.35, col);
+  g.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.globalAlpha = 1 - t * 0.7;
+  ctx.beginPath();
+  ctx.arc(a.landX, a.landY, r, 0, Math.PI * 2);
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
 function drawProjectile(x, y, spell) {
-  const colours = {
-    dragon_blast:   '#ff6020',
-    tidal_wave:     '#40a0ff',
-    thunder_strike: '#ffe040',
-    wind_slash:     '#80ffa0',
-  };
-  const col = colours[spell] || '#ffffff';
+  const col = spellColor(spell);
 
   // Glow
   const g = ctx.createRadialGradient(x, y, 0, x, y, 20);
@@ -592,6 +717,8 @@ function animateProjectile() {
     requestAnimationFrame(animateProjectile);
   } else {
     projAnim.showBlast = true;
+    projAnim.blastStart = Date.now();
+    projAnim.apply();
     render();
     setTimeout(() => {
       if (projAnim) { projAnim.onDone(); }

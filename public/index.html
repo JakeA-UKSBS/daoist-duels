@@ -152,13 +152,19 @@
   <input id="name-input" type="text" placeholder="Your warrior name" maxlength="20">
   <input id="room-input" type="text" placeholder="Room code (share with friends)" maxlength="12" value="jade-mountain">
   <select id="char-select">
-    <option value="0">Monk</option>
-    <option value="1">Geisha</option>
-    <option value="2">Lucky Cat</option>
-    <option value="3">Warrior</option>
+    <option value="0">Cultivator</option>
+    <option value="1">Sage</option>
+    <option value="2">Geisha</option>
+    <option value="3">Lucky Cat</option>
   </select>
   <button id="join-btn">Enter the Arena</button>
   <div id="player-list"></div>
+  <div id="map-row" style="display:none">
+    <select id="map-select">
+      <option value="jade_mountain">🏔 Jade Mountain</option>
+      <option value="crimson_peaks">🌋 Crimson Peaks</option>
+    </select>
+  </div>
   <button id="start-btn" style="display:none;background:#27ae60">Start Game ▶</button>
 </div>
 
