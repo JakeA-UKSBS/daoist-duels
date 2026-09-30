@@ -1,23 +1,30 @@
-// ─── Wuxia Warriors — client ──────────────────────────────────────────────────
+// ─── Daoist Duels — client ────────────────────────────────────────────────────
 const socket = io();
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let myId = null;
 let room = null;
 let selectedSpell = 'dragon_blast';
-let angle = -45;
-let power = 50;
+
+// Aiming — driven by mouse position relative to player
+let aimAngle = -45;   // degrees, -180..180
+let aimPower = 60;    // 10..100, driven by mouse distance from player
+
+// Mouse world position
+let mouseWorld = { x: 0, y: 0 };
+let isAiming = false;  // true while right-button or holding to aim
 
 // Camera
 const cam = { x: 0, y: 0, zoom: 1 };
-let dragging = false;
-let dragStart = { x: 0, y: 0, camX: 0, camY: 0 };
+let panning = false;
+let panStart = { x: 0, y: 0, camX: 0, camY: 0 };
 
 // Keys held
 const keys = {};
+let moveInterval = null;
 
 // Projectile animation
-let projAnim = null;   // { path, idx, landX, landY, spell, radius, onDone }
+let projAnim = null;
 
 // ── DOM refs ──────────────────────────────────────────────────────────────────
 const lobbyEl    = document.getElementById('lobby');
@@ -27,7 +34,6 @@ const ctx        = canvas.getContext('2d');
 const hudEl      = document.getElementById('hud');
 const hpBarsEl   = document.getElementById('hp-bars');
 const logEl      = document.getElementById('log');
-const aimCtrl    = document.getElementById('aim-controls');
 const turnInfo   = document.getElementById('turn-info');
 const powerDisp  = document.getElementById('power-display');
 const playerList = document.getElementById('player-list');
@@ -49,7 +55,6 @@ document.getElementById('join-btn').addEventListener('click', () => {
   const roomId = document.getElementById('room-input').value.trim() || 'default';
   socket.emit('join_room', { roomId, name });
 });
-
 startBtn.addEventListener('click', () => socket.emit('start_game'));
 
 // ── Socket events ─────────────────────────────────────────────────────────────
@@ -57,9 +62,8 @@ socket.on('joined', ({ playerId, room: r }) => {
   myId = playerId;
   room = r;
   updateLobbyList();
-  // Show start button only for the room host (first player)
   if (room.players[0]?.id === myId) startBtn.style.display = 'block';
-  log(`Joined room "${r.id}" — share the room code with friends!`);
+  log(`Joined room "${r.id}" — share this code with friends!`);
 });
 
 socket.on('player_joined', ({ player }) => {
@@ -89,29 +93,32 @@ socket.on('player_moved', ({ id, x, y, facing }) => {
   render();
 });
 
-socket.on('player_aimed', ({ id, angle: a, power: pw }) => {
+socket.on('player_aimed', ({ id, angle, power }) => {
   const p = room?.players.find(p => p.id === id);
-  if (p) { p.angle = a; p.power = pw; }
+  if (p) { p.angle = angle; p.power = power; }
   render();
 });
 
 socket.on('projectile_result', ({ path, landX, landY, spell, radius, terrain, players }) => {
-  // Update terrain & HP
   if (room) {
     room.terrain = terrain;
     players.forEach(({ id, hp }) => {
       const p = room.players.find(p => p.id === id);
       if (p) p.hp = hp;
     });
+    // After explosion, snap all players to new terrain surface
+    room.players.forEach(p => {
+      p.y = terrainYAt(p.x) - 1;
+    });
   }
-  // Animate projectile
-  projAnim = { path, idx: 0, landX, landY, spell, radius, onDone: () => { projAnim = null; renderHpBars(); } };
+  projAnim = { path, idx: 0, landX, landY, spell, radius, onDone: () => { projAnim = null; renderHpBars(); render(); } };
   animateProjectile();
 });
 
 socket.on('turn_changed', ({ currentPlayerId }) => {
   if (room) room.currentPlayerId = currentPlayerId;
   updateTurnInfo();
+  centreOnMe();
   render();
 });
 
@@ -131,9 +138,6 @@ function enterGame() {
   hudEl.style.display = 'flex';
   hpBarsEl.style.display = 'flex';
   logEl.style.display = 'block';
-  aimCtrl.style.display = room.players.some(p => p.id === myId) ? 'flex' : 'none';
-
-  // Centre camera on current player
   centreOnMe();
   updateTurnInfo();
   renderHpBars();
@@ -144,49 +148,122 @@ function enterGame() {
 // ── Game loop ─────────────────────────────────────────────────────────────────
 let lastTime = 0;
 function gameLoop(ts) {
-  const dt = Math.min((ts - lastTime) / 1000, 0.05);
   lastTime = ts;
-  handleKeys(dt);
   render();
   requestAnimationFrame(gameLoop);
 }
 
-// ── Keyboard ──────────────────────────────────────────────────────────────────
+// ── Keyboard movement ─────────────────────────────────────────────────────────
+// Held keys send repeated move events — feels smooth like Worms
 window.addEventListener('keydown', e => {
+  if (keys[e.key]) return; // already held
   keys[e.key] = true;
-  // Aim shortcuts
-  if (isMyTurn()) {
-    if (e.key === 'ArrowLeft' || e.key === 'a') socket.emit('move', { direction: -1 });
-    if (e.key === 'ArrowRight' || e.key === 'd') socket.emit('move', { direction: 1 });
-    if (e.key === ' ') { e.preventDefault(); fireSpell(); }
+
+  if (!isMyTurn() || projAnim) return;
+
+  if (e.key === 'ArrowLeft'  || e.key === 'a') startMoving(-1);
+  if (e.key === 'ArrowRight' || e.key === 'd') startMoving(1);
+  if (e.key === ' ') { e.preventDefault(); fireSpell(); }
+});
+
+window.addEventListener('keyup', e => {
+  keys[e.key] = false;
+  if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'ArrowRight' || e.key === 'd') {
+    stopMoving();
   }
 });
-window.addEventListener('keyup', e => { keys[e.key] = false; });
 
-function handleKeys(dt) {
-  // nothing extra needed — moves are event-driven
+function startMoving(dir) {
+  stopMoving();
+  doMove(dir);
+  moveInterval = setInterval(() => doMove(dir), 50); // 20fps movement ticks
 }
 
-// ── Aim controls ──────────────────────────────────────────────────────────────
-const angleRange = document.getElementById('angle-range');
-const powerRange = document.getElementById('power-range');
+function stopMoving() {
+  clearInterval(moveInterval);
+  moveInterval = null;
+}
 
-angleRange.addEventListener('input', () => {
-  angle = parseInt(angleRange.value);
-  syncAim();
-});
-powerRange.addEventListener('input', () => {
-  power = parseInt(powerRange.value);
-  syncAim();
-});
+function doMove(dir) {
+  if (!isMyTurn() || projAnim) { stopMoving(); return; }
+  const me = myPlayer();
+  if (!me) return;
 
-function syncAim() {
-  powerDisp.textContent = `Power: ${power} | Angle: ${angle}°`;
-  if (isMyTurn()) socket.emit('aim', { angle, power });
+  // Client-side prediction: move locally immediately
+  const speed = 10;
+  me.x = Math.max(20, Math.min(room.terrain.worldW - 20, me.x + dir * speed));
+  me.y = terrainYAt(me.x) - 1;
+  me.facing = dir;
+
+  socket.emit('move', { direction: dir });
   render();
 }
 
-document.getElementById('fire-btn').addEventListener('click', fireSpell);
+// ── Mouse aim ─────────────────────────────────────────────────────────────────
+// Move mouse around your character to aim — angle tracks cursor, distance = power
+canvas.addEventListener('mousemove', e => {
+  mouseWorld = screenToWorld(e.clientX, e.clientY);
+
+  if (!isMyTurn() || projAnim) return;
+
+  const me = myPlayer();
+  if (!me) return;
+
+  // Angle from player to mouse
+  const dx = mouseWorld.x - me.x;
+  const dy = mouseWorld.y - (me.y - 20); // aim from centre of player
+  aimAngle = Math.atan2(dy, dx) * 180 / Math.PI;
+
+  // Clamp: can't aim straight down or behind — keep to front hemisphere
+  // (server will use facing to determine actual vx direction)
+  // Power: distance mapped 50–400px → 10–100
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  aimPower = Math.round(Math.max(10, Math.min(100, (dist / 400) * 100)));
+
+  powerDisp.textContent = `Power: ${aimPower} | Angle: ${Math.round(aimAngle)}°`;
+
+  socket.emit('aim', { angle: aimAngle, power: aimPower });
+  render();
+});
+
+// Left click = fire
+canvas.addEventListener('click', e => {
+  // Ignore if we just finished a pan drag
+  if (panning) return;
+  if (!isMyTurn() || projAnim) return;
+  fireSpell();
+});
+
+// Right-click / middle drag = pan camera
+canvas.addEventListener('mousedown', e => {
+  if (e.button === 1 || e.button === 2) {
+    panning = true;
+    panStart = { x: e.clientX, y: e.clientY, camX: cam.x, camY: cam.y };
+    e.preventDefault();
+  }
+});
+canvas.addEventListener('mousemove', e => {
+  if (!panning) return;
+  cam.x = panStart.camX - (e.clientX - panStart.x) / cam.zoom;
+  cam.y = panStart.camY - (e.clientY - panStart.y) / cam.zoom;
+  clampCamera();
+  render();
+});
+canvas.addEventListener('mouseup', e => {
+  if (e.button === 1 || e.button === 2) panning = false;
+});
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+canvas.addEventListener('wheel', e => {
+  const before = screenToWorld(e.clientX, e.clientY);
+  cam.zoom = Math.max(0.25, Math.min(2, cam.zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
+  // Keep the point under cursor fixed
+  const after = screenToWorld(e.clientX, e.clientY);
+  cam.x += before.x - after.x;
+  cam.y += before.y - after.y;
+  clampCamera();
+  render();
+}, { passive: true });
 
 // Spell bar
 document.querySelectorAll('.spell-btn').forEach(btn => {
@@ -199,47 +276,49 @@ document.querySelectorAll('.spell-btn').forEach(btn => {
 
 function fireSpell() {
   if (!isMyTurn() || projAnim) return;
-  socket.emit('fire', { spell: selectedSpell });
+  socket.emit('fire', { spell: selectedSpell, angle: aimAngle, power: aimPower });
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
 function isMyTurn() {
   return room?.phase === 'playing' && room?.currentPlayerId === myId;
 }
+function myPlayer() {
+  return room?.players.find(p => p.id === myId);
+}
+
+function terrainYAt(x) {
+  if (!room) return 0;
+  const { heights, segments, worldW } = room.terrain;
+  const t = Math.max(0, Math.min(1, x / worldW));
+  const fi = t * segments;
+  const i = Math.floor(fi);
+  const frac = fi - i;
+  const h0 = heights[Math.min(i, segments)];
+  const h1 = heights[Math.min(i + 1, segments)];
+  return h0 + (h1 - h0) * frac;
+}
+
+function screenToWorld(sx, sy) {
+  return { x: sx / cam.zoom + cam.x, y: sy / cam.zoom + cam.y };
+}
 
 // ── Camera ────────────────────────────────────────────────────────────────────
-canvas.addEventListener('mousedown', e => {
-  dragging = true;
-  dragStart = { x: e.clientX, y: e.clientY, camX: cam.x, camY: cam.y };
-});
-canvas.addEventListener('mousemove', e => {
-  if (!dragging) return;
-  cam.x = dragStart.camX - (e.clientX - dragStart.x) / cam.zoom;
-  cam.y = dragStart.camY - (e.clientY - dragStart.y) / cam.zoom;
-  clampCamera();
-  render();
-});
-canvas.addEventListener('mouseup', () => { dragging = false; });
-canvas.addEventListener('wheel', e => {
-  const zoomFactor = e.deltaY < 0 ? 1.1 : 0.9;
-  cam.zoom = Math.max(0.3, Math.min(2, cam.zoom * zoomFactor));
-  clampCamera();
-  render();
-}, { passive: true });
-
 function clampCamera() {
   if (!room) return;
   const { worldW, worldH } = room.terrain;
   const vw = canvas.width / cam.zoom;
   const vh = canvas.height / cam.zoom;
-  cam.x = Math.max(0, Math.min(worldW - vw, cam.x));
-  cam.y = Math.max(0, Math.min(worldH - vh, cam.y));
+  cam.x = Math.max(0, Math.min(Math.max(0, worldW - vw), cam.x));
+  cam.y = Math.max(0, Math.min(Math.max(0, worldH - vh), cam.y));
 }
 
 function centreOnMe() {
-  const me = room?.players.find(p => p.id === myId);
-  if (!me) return;
-  cam.x = me.x - canvas.width / cam.zoom / 2;
-  cam.y = me.y - canvas.height / cam.zoom / 2;
+  const me = myPlayer();
+  const target = me || room?.players[0];
+  if (!target) return;
+  cam.x = target.x - (canvas.width / cam.zoom) / 2;
+  cam.y = target.y - (canvas.height / cam.zoom) / 2;
   clampCamera();
 }
 
@@ -254,46 +333,57 @@ function render() {
 
   // Sky gradient
   const sky = ctx.createLinearGradient(0, 0, 0, H);
-  sky.addColorStop(0, '#1a0a2e');
-  sky.addColorStop(1, '#3a1060');
+  sky.addColorStop(0, '#0d0520');
+  sky.addColorStop(0.6, '#2a0d4a');
+  sky.addColorStop(1, '#1a0828');
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, W, H);
 
-  // Transform: world → screen
+  // World transform
   ctx.scale(cam.zoom, cam.zoom);
   ctx.translate(-cam.x, -cam.y);
 
-  // Terrain
-  drawTerrain(ctx, worldW, worldH, heights, segments);
+  drawTerrain(worldW, worldH, heights, segments);
 
-  // Players
-  room.players.forEach((p, i) => drawPlayer(ctx, p, i));
+  room.players.forEach(p => drawPlayer(p));
 
-  // Aim line for current player (only if it's you)
+  // Aim indicator — dotted arc from current player outward to mouse
   if (isMyTurn() && !projAnim) {
-    const me = room.players.find(p => p.id === myId);
-    if (me) drawAimLine(ctx, me);
+    const me = myPlayer();
+    if (me) drawAimIndicator(me);
   }
 
-  // Projectile animation dot
+  // Projectile
   if (projAnim) {
-    const pt = projAnim.path[projAnim.idx] || { x: projAnim.landX, y: projAnim.landY };
-    drawProjectile(ctx, pt.x, pt.y, projAnim.spell);
+    const pt = projAnim.path[Math.min(projAnim.idx, projAnim.path.length - 1)];
+    if (pt) drawProjectile(pt.x, pt.y, projAnim.spell);
   }
 
   // Explosion flash
-  if (projAnim && projAnim.idx >= projAnim.path.length) {
+  if (projAnim && projAnim.showBlast) {
+    const g = ctx.createRadialGradient(projAnim.landX, projAnim.landY, 0, projAnim.landX, projAnim.landY, projAnim.radius * 1.5);
+    g.addColorStop(0, 'rgba(255,220,80,0.9)');
+    g.addColorStop(0.4, 'rgba(255,100,20,0.6)');
+    g.addColorStop(1, 'rgba(255,60,0,0)');
     ctx.beginPath();
-    ctx.arc(projAnim.landX, projAnim.landY, projAnim.radius, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(255,160,40,0.35)';
+    ctx.arc(projAnim.landX, projAnim.landY, projAnim.radius * 1.5, 0, Math.PI * 2);
+    ctx.fillStyle = g;
     ctx.fill();
   }
 
   ctx.restore();
+
+  // HUD overlay: controls hint
+  if (isMyTurn() && !projAnim) {
+    ctx.fillStyle = 'rgba(240,208,128,0.7)';
+    ctx.font = '13px Georgia';
+    ctx.textAlign = 'left';
+    ctx.fillText('A/D or ←/→ to walk  ·  Move mouse to aim  ·  Click to fire', 12, canvas.height - 12);
+  }
 }
 
-function drawTerrain(ctx, worldW, worldH, heights, segments) {
-  // Terrain fill
+function drawTerrain(worldW, worldH, heights, segments) {
+  // Main terrain body
   ctx.beginPath();
   ctx.moveTo(0, heights[0]);
   for (let i = 1; i <= segments; i++) {
@@ -304,163 +394,208 @@ function drawTerrain(ctx, worldW, worldH, heights, segments) {
   ctx.closePath();
 
   const grad = ctx.createLinearGradient(0, 0, 0, worldH);
-  grad.addColorStop(0, '#4a7a30');
-  grad.addColorStop(0.2, '#3a5a20');
-  grad.addColorStop(1, '#2a3a15');
+  grad.addColorStop(0, '#5a8a38');
+  grad.addColorStop(0.15, '#3d6022');
+  grad.addColorStop(0.5, '#2a4018');
+  grad.addColorStop(1, '#1a2810');
   ctx.fillStyle = grad;
   ctx.fill();
 
-  // Terrain top edge
+  // Grass edge
   ctx.beginPath();
   ctx.moveTo(0, heights[0]);
   for (let i = 1; i <= segments; i++) {
     ctx.lineTo((i / segments) * worldW, heights[i]);
   }
-  ctx.strokeStyle = '#80c840';
-  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#7ec840';
+  ctx.lineWidth = 4 / cam.zoom;
   ctx.stroke();
 
-  // Lava at bottom
+  // Lava
+  const lavaY = worldH - 50;
+  ctx.fillStyle = '#8b1a00';
+  ctx.fillRect(0, lavaY, worldW, 50);
+  // Animated lava glow strips
+  const t = Date.now() / 800;
+  for (let i = 0; i < 8; i++) {
+    const lx = ((i / 8 + t * 0.05) % 1) * worldW;
+    const lg = ctx.createRadialGradient(lx, lavaY + 10, 0, lx, lavaY + 10, 120);
+    lg.addColorStop(0, 'rgba(255,120,0,0.5)');
+    lg.addColorStop(1, 'rgba(255,0,0,0)');
+    ctx.fillStyle = lg;
+    ctx.fillRect(lx - 120, lavaY, 240, 50);
+  }
   ctx.fillStyle = '#c0392b';
-  ctx.fillRect(0, worldH - 40, worldW, 40);
-  ctx.fillStyle = '#e74c3c';
-  ctx.fillRect(0, worldH - 20, worldW, 20);
+  ctx.fillRect(0, lavaY, worldW, 8);
 }
 
-function drawPlayer(ctx, p, idx) {
-  const x = p.x, y = p.y;
-  const isMe = p.id === myId;
+function drawPlayer(p) {
+  const x = p.x;
+  const y = p.y;    // y is the feet position (on terrain)
   const isCurrent = p.id === room.currentPlayerId;
   const alive = p.hp > 0;
 
-  ctx.globalAlpha = alive ? 1 : 0.4;
+  ctx.globalAlpha = alive ? 1 : 0.3;
 
-  // Shadow
+  // Body (centred at y-20 above feet)
+  const cy = y - 22;
+
+  // Shadow ellipse on ground
   ctx.beginPath();
-  ctx.ellipse(x, y + 4, 18, 5, 0, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.ellipse(x, y - 2, 16, 5, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
   ctx.fill();
 
   // Body circle
   ctx.beginPath();
-  ctx.arc(x, y - 20, 18, 0, Math.PI * 2);
+  ctx.arc(x, cy, 18, 0, Math.PI * 2);
   ctx.fillStyle = p.color;
   ctx.fill();
-  ctx.strokeStyle = '#ffffff44';
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
   ctx.lineWidth = 2;
   ctx.stroke();
 
-  // Character initial
+  // Initial
   ctx.fillStyle = '#fff';
-  ctx.font = 'bold 16px Georgia';
+  ctx.font = `bold 15px Georgia`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(p.name[0]?.toUpperCase() || '?', x, y - 20);
+  ctx.fillText((p.name[0] || '?').toUpperCase(), x, cy);
 
-  // Current turn indicator
-  if (isCurrent) {
+  // Current turn ring + arrow
+  if (isCurrent && alive) {
     ctx.beginPath();
-    ctx.arc(x, y - 20, 24, 0, Math.PI * 2);
+    ctx.arc(x, cy, 24, 0, Math.PI * 2);
     ctx.strokeStyle = '#f0d080';
-    ctx.lineWidth = 3;
-    ctx.setLineDash([6, 4]);
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([5, 4]);
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Arrow above
+    // Bobbing arrow above
+    const bob = Math.sin(Date.now() / 300) * 3;
     ctx.beginPath();
-    ctx.moveTo(x, y - 54);
-    ctx.lineTo(x - 6, y - 44);
-    ctx.lineTo(x + 6, y - 44);
+    ctx.moveTo(x, cy - 38 - bob);
+    ctx.lineTo(x - 7, cy - 28 - bob);
+    ctx.lineTo(x + 7, cy - 28 - bob);
     ctx.closePath();
     ctx.fillStyle = '#f0d080';
     ctx.fill();
   }
 
-  // Name tag
+  // Name
   ctx.font = '11px Georgia';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'bottom';
-  ctx.fillStyle = isCurrent ? '#f0d080' : '#c0b080';
-  ctx.fillText(p.name, x, y - 46);
+  ctx.fillStyle = isCurrent ? '#f0d080' : '#b0a060';
+  ctx.fillText(p.name, x, cy - 26);
 
-  // Mini HP bar
-  ctx.fillStyle = '#333';
-  ctx.fillRect(x - 20, y - 38, 40, 4);
+  // HP bar
+  ctx.fillStyle = '#222';
+  ctx.fillRect(x - 20, cy - 38, 40, 5);
   ctx.fillStyle = hpColor(p.hp);
-  ctx.fillRect(x - 20, y - 38, 40 * p.hp / 100, 4);
+  ctx.fillRect(x - 20, cy - 38, 40 * p.hp / 100, 5);
 
   ctx.globalAlpha = 1;
 }
 
-function drawAimLine(ctx, p) {
-  const angleRad = (angle * Math.PI) / 180;
-  const speed = power * 12;
+function drawAimIndicator(me) {
+  // Draw a dotted trajectory arc from player centre toward mouse
+  const startX = me.x;
+  const startY = me.y - 22;
+
+  // Arrow from player to mouse showing direction
+  const dx = mouseWorld.x - startX;
+  const dy = mouseWorld.y - startY;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist < 5) return;
+
+  const angleRad = aimAngle * Math.PI / 180;
+
+  // Simulated arc (dotted) using same physics as server
+  const speed = aimPower * 12;
   const GRAVITY = 600;
   const dt = 1 / 60;
-  let x = p.x, y = p.y - 30;
-  let vx = Math.cos(angleRad) * speed * p.facing;
+  let px = startX, py = startY;
+  let vx = Math.cos(angleRad) * speed;
   let vy = Math.sin(angleRad) * speed;
+  const { worldW, worldH } = room.terrain;
 
   ctx.beginPath();
-  ctx.moveTo(x, y);
-  ctx.setLineDash([6, 6]);
-  ctx.strokeStyle = 'rgba(255,220,100,0.5)';
+  ctx.moveTo(px, py);
+  ctx.setLineDash([5, 7]);
+  ctx.strokeStyle = 'rgba(255,220,80,0.55)';
   ctx.lineWidth = 1.5;
 
-  for (let i = 0; i < 120; i++) {
+  for (let i = 0; i < 180; i++) {
     vy += GRAVITY * dt;
-    x += vx * dt;
-    y += vy * dt;
-    if (i % 3 === 0) ctx.lineTo(x, y);
-    const { worldW, worldH, heights, segments } = room.terrain;
-    const t = Math.max(0, Math.min(1, x / worldW));
-    const fi = t * segments;
-    const si = Math.floor(fi);
-    const frac = fi - si;
-    const terrainY = heights[Math.min(si, segments)] + (heights[Math.min(si + 1, segments)] - heights[Math.min(si, segments)]) * frac;
-    if (y >= terrainY || x < 0 || x > worldW || y > worldH) break;
+    px += vx * dt;
+    py += vy * dt;
+    if (i % 2 === 0) ctx.lineTo(px, py);
+    const ty = terrainYAt(px);
+    if (py >= ty || px < 0 || px > worldW || py > worldH) {
+      // Draw landing X
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath();
+      ctx.strokeStyle = 'rgba(255,80,80,0.8)';
+      ctx.lineWidth = 2;
+      ctx.moveTo(px - 6, py - 6); ctx.lineTo(px + 6, py + 6);
+      ctx.moveTo(px + 6, py - 6); ctx.lineTo(px - 6, py + 6);
+      ctx.stroke();
+      return;
+    }
   }
   ctx.stroke();
   ctx.setLineDash([]);
+
+  // Power ring around player — bigger ring = more power
+  const ringR = 30 + aimPower * 0.6;
+  ctx.beginPath();
+  ctx.arc(startX, startY, ringR, angleRad - 0.3, angleRad + 0.3);
+  ctx.strokeStyle = `rgba(255,180,40,${0.3 + aimPower / 200})`;
+  ctx.lineWidth = 3;
+  ctx.stroke();
 }
 
-function drawProjectile(ctx, x, y, spell) {
+function drawProjectile(x, y, spell) {
   const colours = {
     dragon_blast:   '#ff6020',
-    tidal_wave:     '#2080ff',
+    tidal_wave:     '#40a0ff',
     thunder_strike: '#ffe040',
     wind_slash:     '#80ffa0',
   };
   const col = colours[spell] || '#ffffff';
 
   // Glow
-  const g = ctx.createRadialGradient(x, y, 0, x, y, 16);
+  const g = ctx.createRadialGradient(x, y, 0, x, y, 20);
   g.addColorStop(0, col);
-  g.addColorStop(1, 'transparent');
+  g.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.beginPath();
-  ctx.arc(x, y, 16, 0, Math.PI * 2);
+  ctx.arc(x, y, 20, 0, Math.PI * 2);
   ctx.fillStyle = g;
   ctx.fill();
 
-  // Core
+  // Core dot
   ctx.beginPath();
-  ctx.arc(x, y, 6, 0, Math.PI * 2);
-  ctx.fillStyle = col;
+  ctx.arc(x, y, 5, 0, Math.PI * 2);
+  ctx.fillStyle = '#fff';
   ctx.fill();
 }
 
 // ── Projectile animation ──────────────────────────────────────────────────────
 function animateProjectile() {
   if (!projAnim) return;
-  projAnim.idx++;
+  projAnim.idx += 2; // step 2 path points per frame for speed
   render();
   if (projAnim.idx < projAnim.path.length) {
     requestAnimationFrame(animateProjectile);
   } else {
-    // Show explosion for a moment then finish
+    projAnim.showBlast = true;
     render();
-    setTimeout(() => { projAnim?.onDone?.(); projAnim = null; render(); }, 600);
+    setTimeout(() => {
+      if (projAnim) { projAnim.onDone(); }
+    }, 500);
   }
 }
 
@@ -480,11 +615,6 @@ function updateTurnInfo() {
   turnInfo.textContent = cp
     ? (isYou ? `⚔ YOUR TURN — ${cp.name}` : `${cp.name}'s turn…`)
     : 'Waiting…';
-  // Show/hide aim controls
-  if (aimCtrl.style.display !== 'none') {
-    aimCtrl.style.opacity = isYou ? '1' : '0.4';
-    aimCtrl.style.pointerEvents = isYou ? 'auto' : 'none';
-  }
 }
 
 function renderHpBars() {

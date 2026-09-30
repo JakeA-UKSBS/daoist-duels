@@ -49,7 +49,7 @@ class GameRoom {
     const idx = this.players.length;
     const colors = ['#e74c3c','#3498db','#2ecc71','#f39c12','#9b59b6','#1abc9c'];
     const startX = 200 + (WORLD_W - 400) / Math.max(MAX_PLAYERS - 1, 1) * idx;
-    const startY = this.terrainYAt(startX) - 60;
+    const startY = this.terrainYAt(startX) - 1;  // feet on terrain
     const player = {
       id: socketId,
       name,
@@ -166,18 +166,22 @@ io.on('connection', (socket) => {
     socket.to(room.id).emit('player_aimed', { id: socket.id, angle, power });
   });
 
-  socket.on('fire', ({ spell }) => {
+  socket.on('fire', ({ spell, angle, power }) => {
     const room = rooms[socket.data.roomId];
     if (!room || room.phase !== 'playing') return;
     const cp = room.currentPlayer();
     if (!cp || cp.id !== socket.id) return;
 
+    // Use angle/power sent with fire event (from mouse aim), fall back to stored
+    if (angle !== undefined) cp.angle = angle;
+    if (power !== undefined) cp.power = power;
+
     const angleRad = (cp.angle * Math.PI) / 180;
     const speed = cp.power * 12;
     const proj = {
       x: cp.x,
-      y: cp.y - 30,
-      vx: Math.cos(angleRad) * speed * cp.facing,
+      y: cp.y - 22,
+      vx: Math.cos(angleRad) * speed,
       vy: Math.sin(angleRad) * speed,
       spell,
       ownerId: socket.id,
@@ -217,9 +221,9 @@ io.on('connection', (socket) => {
     const cp = room.currentPlayer();
     if (!cp || cp.id !== socket.id) return;
 
-    const speed = 8;
+    const speed = 10;
     cp.x = Math.max(20, Math.min(WORLD_W - 20, cp.x + direction * speed));
-    cp.y = room.terrainYAt(cp.x) - 30;
+    cp.y = room.terrainYAt(cp.x) - 1;  // feet sit ON the terrain surface
     cp.facing = direction;
 
     io.to(room.id).emit('player_moved', { id: socket.id, x: cp.x, y: cp.y, facing: cp.facing });

@@ -96,36 +96,7 @@
     .hp-bar-bg { width: 80px; height: 8px; background: #333; border-radius: 4px; }
     .hp-bar-fill { height: 100%; border-radius: 4px; transition: width 0.4s; }
 
-    /* ── Aim indicator ─────────────────── */
-    #aim-controls {
-      position: fixed;
-      right: 16px;
-      top: 50%;
-      transform: translateY(-50%);
-      display: none;
-      flex-direction: column;
-      align-items: center;
-      gap: 8px;
-      z-index: 10;
-      background: rgba(10,0,30,0.8);
-      padding: 12px;
-      border-radius: 8px;
-      border: 1px solid #f0a04044;
-    }
-    #aim-controls label { font-size: 0.8rem; color: #c0a060; }
-    #angle-range, #power-range { width: 120px; accent-color: #f0a040; }
-    #fire-btn {
-      padding: 10px 24px;
-      background: #c0392b;
-      color: #fff;
-      border: none;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 1rem;
-      font-family: inherit;
-      margin-top: 4px;
-    }
-    #fire-btn:hover { background: #e74c3c; }
+    /* aim controls removed — mouse-driven now */
 
     /* ── Chat/log ──────────────────────── */
     #log {
@@ -206,16 +177,6 @@
 <!-- ── GAME CANVAS ───────────────────────────────── -->
 <div id="game">
   <canvas id="gameCanvas"></canvas>
-</div>
-
-<!-- ── AIM CONTROLS ──────────────────────────────── -->
-<div id="aim-controls">
-  <label>Angle</label>
-  <input type="range" id="angle-range" min="-85" max="0" value="-45">
-  <label>Power</label>
-  <input type="range" id="power-range" min="10" max="100" value="50">
-  <button id="fire-btn">🔥 Fire!</button>
-  <small style="color:#806080;font-size:0.75rem">← → Move &nbsp; A/D aim</small>
 </div>
 
 <!-- ── HP BARS ───────────────────────────────────── -->
