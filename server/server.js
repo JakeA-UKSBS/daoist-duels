@@ -13,7 +13,8 @@ const io = new Server(server, {
 app.use(express.static(path.join(__dirname, '../public')));
 
 // ─── Game constants ───────────────────────────────────────────────────────────
-const GRAVITY  = 600;   // px / s²
+const GRAVITY  = 900;   // px / s² — strong enough that shots visibly arc
+const SPEED_PER_POWER = 12;   // launch speed (px/s) per point of power
 const MAX_PLAYERS = 6;
 const PLAYER_H = 40;    // sprite height; body centre is PLAYER_H/2 above feet
 
@@ -245,7 +246,7 @@ function doFire(room, cp, spell, angle, power) {
 
   const sp = SPELLS[spell] || SPELLS.dragon_blast;
   const angleRad = (cp.angle * Math.PI) / 180;
-  const speed = cp.power * 14 * sp.speed;
+  const speed = cp.power * SPEED_PER_POWER * sp.speed;
   cp.facing = Math.cos(angleRad) >= 0 ? 1 : -1;
   const proj = {
     x: cp.x,
@@ -305,6 +306,7 @@ function endTurn(room, delay = 0) {
 function roomStateFor(room) {
   return {
     spells: SPELLS,
+    physics: { gravity: GRAVITY, speedPerPower: SPEED_PER_POWER },
     maps: Object.fromEntries(Object.entries(Terrain.MAPS).map(([k, m]) => [k, m.name])),
     id: room.id,
     phase: room.phase,

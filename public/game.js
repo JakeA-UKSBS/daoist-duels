@@ -188,17 +188,28 @@ socket.on('projectile_result', ({ path, landX, landY, spell, radius, hits, falle
     (fallen || []).forEach(n => log(`${n} fell into the abyss!`));
     renderHpBars();
   };
-  projAnim = { path, idx: 0, landX, landY, spell, radius, apply, onDone: () => { projAnim = null; followPlayer(room?.currentPlayerId); render(); } };
+  projAnim = { path, idx: 0, landX, landY, spell, radius, apply, onDone: () => {
+    projAnim = null;
+    if (pendingTurn) { const id = pendingTurn; pendingTurn = null; applyTurn(id); }
+    else followPlayer(room?.currentPlayerId);
+  } };
   camFollow = () => projAnim && projAnim.path[Math.min(projAnim.idx, projAnim.path.length - 1)];
   animateProjectile();
 });
 
+// The server hands over the turn as soon as a shot is fired — hold the switch
+// (camera + "your turn") until the shot has landed so everyone sees it hit
+let pendingTurn = null;
 socket.on('turn_changed', ({ currentPlayerId }) => {
-  if (room) room.currentPlayerId = currentPlayerId;
-  updateTurnInfo();
-  followPlayer(currentPlayerId);
-  render();
+  if (projAnim) { pendingTurn = currentPlayerId; return; }
+  applyTurn(currentPlayerId);
 });
+function applyTurn(id) {
+  if (room) room.currentPlayerId = id;
+  updateTurnInfo();
+  followPlayer(id);
+  render();
+}
 
 socket.on('game_over', ({ winner }) => {
   const msg = winner ? `${winner.name} wins the duel! 🏆` : 'The battle ends in a draw.';
@@ -320,7 +331,7 @@ canvas.addEventListener('mousemove', e => {
   // (server will use facing to determine actual vx direction)
   // Power: distance mapped 50–400px → 10–100
   const dist = Math.sqrt(dx * dx + dy * dy);
-  aimPower = Math.round(Math.max(10, Math.min(100, (dist / 400) * 100)));
+  aimPower = Math.round(Math.max(10, Math.min(100, (dist / 500) * 100)));
   me.facing = dx >= 0 ? 1 : -1;
 
   powerDisp.textContent = `Power: ${aimPower} | Angle: ${Math.round(aimAngle)}°`;
@@ -816,41 +827,51 @@ function drawAimIndicator(me) {
 
   // Simulated arc (dotted) using same physics as server
   const sp = room.spells?.[selectedSpell] || { speed: 1, gravity: 1 };
-  const speed = aimPower * 14 * sp.speed;
-  const GRAVITY = 600 * sp.gravity;
+  const phys = room.physics || { gravity: 900, speedPerPower: 12 };
+  const speed = aimPower * phys.speedPerPower * sp.speed;
+  const GRAVITY = phys.gravity * sp.gravity;
   const dt = 1 / 60;
   let px = startX, py = startY;
   let vx = Math.cos(angleRad) * speed;
   let vy = Math.sin(angleRad) * speed;
   const { worldW, worldH } = room.terrain;
 
-  ctx.beginPath();
-  ctx.moveTo(px, py);
-  ctx.setLineDash([5, 7]);
-  ctx.strokeStyle = 'rgba(255,220,80,0.55)';
-  ctx.lineWidth = 1.5;
-
-  for (let i = 0; i < 180; i++) {
+  // Simulate the flight, collecting a dot every few frames
+  const dots = [];
+  let land = null;
+  for (let i = 0; i < 360; i++) {
     vy += GRAVITY * dt;
     px += vx * dt;
     py += vy * dt;
-    if (i % 2 === 0) ctx.lineTo(px, py);
+    if (i % 4 === 3) dots.push([px, py]);
     if (Terrain.isSolid(room.terrain, px, py) || (room.terrain.liquid && py >= room.terrain.liquid.y) ||
-        px < 0 || px > worldW || py > worldH) {
-      // Draw landing X
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.beginPath();
-      ctx.strokeStyle = 'rgba(255,80,80,0.8)';
-      ctx.lineWidth = 2;
-      ctx.moveTo(px - 6, py - 6); ctx.lineTo(px + 6, py + 6);
-      ctx.moveTo(px + 6, py - 6); ctx.lineTo(px - 6, py + 6);
-      ctx.stroke();
-      return;
-    }
+        px < 0 || px > worldW || py > worldH) { land = [px, py]; break; }
   }
-  ctx.stroke();
-  ctx.setLineDash([]);
+
+  // Dots: white with a dark rim so they show on any background, fading with distance
+  dots.forEach(([x, y], k) => {
+    ctx.globalAlpha = Math.max(0.35, 1 - k / dots.length * 0.6);
+    ctx.beginPath();
+    ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+    ctx.fillStyle = '#fff8e0';
+    ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(40,20,0,0.85)';
+    ctx.stroke();
+  });
+  ctx.globalAlpha = 1;
+
+  if (land) {
+    const [lx, ly] = land;
+    ctx.lineCap = 'round';
+    for (const [w, c] of [[6, 'rgba(40,0,0,0.85)'], [3, '#ff4a3a']]) {
+      ctx.beginPath();
+      ctx.moveTo(lx - 8, ly - 8); ctx.lineTo(lx + 8, ly + 8);
+      ctx.moveTo(lx + 8, ly - 8); ctx.lineTo(lx - 8, ly + 8);
+      ctx.lineWidth = w; ctx.strokeStyle = c; ctx.stroke();
+    }
+    ctx.lineCap = 'butt';
+  }
 
   // Power ring around player — bigger ring = more power
   const ringR = 30 + aimPower * 0.6;
