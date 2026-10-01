@@ -149,16 +149,24 @@
 <div id="lobby">
   <h1>⚔ Daoist Duels</h1>
   <p class="sub">Turn-based artillery — Wuxia style</p>
-  <input id="name-input" type="text" placeholder="Your warrior name" maxlength="20">
-  <input id="room-input" type="text" placeholder="Room code (share with friends)" maxlength="12" value="jade-mountain">
+  <input id="name-input" type="text" placeholder="Your Daoist name" maxlength="20">
   <select id="char-select">
     <option value="0">Cultivator</option>
     <option value="1">Sage</option>
     <option value="2">Geisha</option>
     <option value="3">Lucky Cat</option>
   </select>
-  <button id="join-btn">Enter the Arena</button>
+  <div id="mode-row" style="display:flex;gap:12px">
+    <button id="bots-btn">☯ Play vs Bots</button>
+    <button id="friends-btn" style="background:#2c5d8a">🏯 Invite Friends</button>
+  </div>
+  <div id="room-row" style="display:none;flex-direction:column;align-items:center;gap:12px">
+    <input id="room-input" type="text" placeholder="Room code" maxlength="12">
+    <button id="join-btn">Enter the Arena</button>
+  </div>
+  <div id="invite-info" style="display:none;font-size:.9rem;color:#c0a060;text-align:center"></div>
   <div id="player-list"></div>
+  <button id="add-bot-btn" style="display:none;background:#6a4c93">+ Add Bot</button>
   <div id="map-row" style="display:none">
     <select id="map-select">
       <option value="jade_mountain">🏔 Jade Mountain</option>

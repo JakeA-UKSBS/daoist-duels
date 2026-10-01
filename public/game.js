@@ -70,12 +70,31 @@ window.addEventListener('resize', resize);
 resize();
 
 // ── Lobby ─────────────────────────────────────────────────────────────────────
-document.getElementById('join-btn').addEventListener('click', () => {
-  const name = document.getElementById('name-input').value.trim() || 'Warrior';
-  const roomId = document.getElementById('room-input').value.trim() || 'default';
-  const charIndex = Number(document.getElementById('char-select').value);
+const $ = id => document.getElementById(id);
+let vsBots = false;
+function joinRoom(roomId) {
+  const name = $('name-input').value.trim() || 'Daoist';
+  const charIndex = Number($('char-select').value);
+  $('mode-row').style.display = 'none';
+  $('room-row').style.display = 'none';
   socket.emit('join_room', { roomId, name, charIndex });
+}
+const randomCode = () => Math.random().toString(36).slice(2, 7);
+$('bots-btn').addEventListener('click', () => { vsBots = true; joinRoom('solo-' + randomCode()); });
+$('friends-btn').addEventListener('click', () => {
+  $('mode-row').style.display = 'none';
+  $('room-row').style.display = 'flex';
+  if (!$('room-input').value) $('room-input').value = randomCode();
 });
+$('join-btn').addEventListener('click', () => joinRoom($('room-input').value.trim() || randomCode()));
+$('add-bot-btn').addEventListener('click', () => socket.emit('add_bot'));
+// Invite links: ?room=abc drops you straight into the join step
+const linkRoom = new URLSearchParams(location.search).get('room');
+if (linkRoom) {
+  $('mode-row').style.display = 'none';
+  $('room-row').style.display = 'flex';
+  $('room-input').value = linkRoom;
+}
 startBtn.addEventListener('click', () => {
   socket.emit('start_game', { map: document.getElementById('map-select').value });
 });
@@ -85,9 +104,19 @@ socket.on('joined', ({ playerId, room: r }) => {
   myId = playerId;
   room = r;
   updateLobbyList();
-  document.getElementById('join-btn').style.display = 'none';
-  if (room.players[0]?.id === myId) document.getElementById('map-row').style.display = 'block';
-  log(`Joined room "${r.id}" — share this code with friends!`);
+  const isHost = room.players[0]?.id === myId;
+  if (isHost) {
+    $('map-row').style.display = 'block';
+    $('add-bot-btn').style.display = 'block';
+    if (vsBots) socket.emit('add_bot');
+  }
+  if (!vsBots) {
+    const link = `${location.origin}${location.pathname}?room=${encodeURIComponent(r.id)}`;
+    $('invite-info').style.display = 'block';
+    const a = document.createElement('a');
+    a.href = link; a.textContent = link; a.style.color = '#f0a040';
+    $('invite-info').replaceChildren(`Room ${r.id} — send friends this link:`, document.createElement('br'), a);
+  }
 });
 
 socket.on('player_joined', ({ player, players }) => {

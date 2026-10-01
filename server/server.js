@@ -211,6 +211,17 @@ io.on('connection', (socket) => {
     socket.to(roomId).emit('player_joined', { player, players: room.players });
   });
 
+  socket.on('add_bot', () => {
+    const room = rooms[socket.data.roomId];
+    if (!room || room.phase !== 'lobby' || room.players[0]?.id !== socket.id) return;
+    const n = room.players.filter(p => p.isBot).length + 1;
+    const names = ['Master Lin', 'Elder Zhao', 'Abbot Wu', 'Hermit Qing', 'Sister Mei'];
+    const bot = room.addPlayer(`bot-${room.id}-${n}`, names[(n - 1) % names.length], Math.floor(Math.random() * 4));
+    if (!bot) return socket.emit('error', 'Room is full');
+    bot.isBot = true;
+    io.to(room.id).emit('player_joined', { player: bot, players: room.players });
+  });
+
   socket.on('start_game', ({ map } = {}) => {
     const room = rooms[socket.data.roomId];
     if (!room || room.players[0]?.id !== socket.id) return;
@@ -239,40 +250,7 @@ io.on('connection', (socket) => {
     const cp = room.currentPlayer();
     if (!cp || cp.id !== socket.id) return;
 
-    // Use angle/power sent with fire event (from mouse aim), fall back to stored
-    if (angle !== undefined) cp.angle = angle;
-    if (power !== undefined) cp.power = power;
-
-    const sp = SPELLS[spell] || SPELLS.dragon_blast;
-    const angleRad = (cp.angle * Math.PI) / 180;
-    const speed = cp.power * 12 * sp.speed;
-    cp.facing = Math.cos(angleRad) >= 0 ? 1 : -1;
-    const proj = {
-      x: cp.x,
-      y: cp.y - PLAYER_H / 2,
-      vx: Math.cos(angleRad) * speed,
-      vy: Math.sin(angleRad) * speed,
-      gravity: GRAVITY * sp.gravity,
-    };
-
-    // Simulate projectile server-side (deterministic)
-    const result = simulateProjectile(proj, room, socket.id);
-    const hits = room.applyExplosion(result.x, result.y, sp);
-    const fallen = room.checkFalls();
-
-    io.to(room.id).emit('projectile_result', {
-      path: result.path,
-      landX: result.x,
-      landY: result.y,
-      spell,
-      radius: sp.radius,
-      hits,
-      fallen,
-      terrain: room.terrain,
-      players: room.players.map(p => ({ id: p.id, hp: p.hp, x: p.x, y: p.y, facing: p.facing })),
-    });
-
-    endTurn(room);
+    doFire(room, cp, spell, angle, power);
   });
 
   socket.on('move', ({ direction }) => {
@@ -295,12 +273,64 @@ io.on('connection', (socket) => {
     if (!room) return;
     room.players = room.players.filter(p => p.id !== socket.id);
     io.to(room.id).emit('player_left', { id: socket.id });
-    if (room.players.length === 0) delete rooms[socket.data.roomId];
+    if (!room.players.some(p => !p.isBot)) delete rooms[socket.data.roomId];
   });
 });
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-function endTurn(room) {
+function doFire(room, cp, spell, angle, power) {
+  // Use angle/power sent with fire event (from mouse aim), fall back to stored
+  if (angle !== undefined) cp.angle = angle;
+  if (power !== undefined) cp.power = power;
+
+  const sp = SPELLS[spell] || SPELLS.dragon_blast;
+  const angleRad = (cp.angle * Math.PI) / 180;
+  const speed = cp.power * 12 * sp.speed;
+  cp.facing = Math.cos(angleRad) >= 0 ? 1 : -1;
+  const proj = {
+    x: cp.x,
+    y: cp.y - PLAYER_H / 2,
+    vx: Math.cos(angleRad) * speed,
+    vy: Math.sin(angleRad) * speed,
+    gravity: GRAVITY * sp.gravity,
+  };
+
+  // Simulate projectile server-side (deterministic)
+  const result = simulateProjectile(proj, room, cp.id);
+  const hits = room.applyExplosion(result.x, result.y, sp);
+  const fallen = room.checkFalls();
+
+  io.to(room.id).emit('projectile_result', {
+    path: result.path,
+    landX: result.x,
+    landY: result.y,
+    spell,
+    radius: sp.radius,
+    hits,
+    fallen,
+    terrain: room.terrain,
+    players: room.players.map(p => ({ id: p.id, hp: p.hp, x: p.x, y: p.y, facing: p.facing })),
+  });
+
+  // Wait for clients to finish the projectile animation before the next turn
+  endTurn(room, result.path.length / 60 * 1000 + 1200);
+}
+
+// Simple NPC: face the nearest enemy and lob a spell roughly at them
+function botTurn(room) {
+  const cp = room.currentPlayer();
+  if (room.phase !== 'playing' || !cp || !cp.isBot) return;
+  const foes = room.players.filter(p => p.hp > 0 && p.id !== cp.id);
+  const target = foes.sort((a, b) => Math.abs(a.x - cp.x) - Math.abs(b.x - cp.x))[0];
+  const dir = target && target.x < cp.x ? -1 : 1;
+  const elev = 40 + Math.random() * 20;                       // degrees above horizontal
+  const angle = dir > 0 ? -elev : -180 + elev;
+  const power = 40 + Math.random() * 35;
+  const keys = Object.keys(SPELLS);
+  doFire(room, cp, keys[Math.floor(Math.random() * keys.length)], angle, power);
+}
+
+function endTurn(room, delay = 0) {
   const alive = room.players.filter(p => p.hp > 0);
   if (alive.length <= 1) {
     room.phase = 'over';
@@ -309,6 +339,7 @@ function endTurn(room) {
   }
   room.advanceTurn();
   io.to(room.id).emit('turn_changed', { currentPlayerId: room.currentPlayer()?.id });
+  if (room.currentPlayer()?.isBot) setTimeout(() => botTurn(room), delay + 1000);
 }
 
 function roomStateFor(room) {
