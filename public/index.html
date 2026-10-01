@@ -98,6 +98,19 @@
 
     /* aim controls removed — mouse-driven now */
 
+    /* ── Controls panel ──────────────── */
+    #controls {
+      position: fixed; right: 12px; bottom: 56px; z-index: 10; display: none;
+      background: rgba(10,0,30,0.78); border: 1px solid #f0a04055; border-radius: 8px;
+      padding: 10px 14px; font-size: 0.8rem; color: #e8d6a8; min-width: 200px;
+    }
+    #controls h4 { color: #f0a040; font-size: 0.85rem; margin-bottom: 6px; letter-spacing: 1px; }
+    #controls table { border-collapse: collapse; }
+    #controls td { padding: 2px 0; }
+    #controls td:first-child { color: #f0d080; font-weight: bold; padding-right: 14px; white-space: nowrap; }
+    #controls.hidden table { display: none; }
+    #controls.hidden h4 { margin: 0; }
+
     /* ── Chat/log ──────────────────────── */
     #log {
       position: fixed;
@@ -190,6 +203,22 @@
     <button class="spell-btn" data-spell="wind_slash">💨 Wind Slash</button>
   </div>
   <div id="power-display">Power: 50 | Angle: -45°</div>
+</div>
+
+<!-- ── CONTROLS ──────────────────────────────────── -->
+<div id="controls">
+  <h4>CONTROLS <span style="color:#a08868;font-weight:normal">(H to hide)</span></h4>
+  <table>
+    <tr><td>A / D</td><td>Walk</td></tr>
+    <tr><td>W</td><td>Hop</td></tr>
+    <tr><td>Q</td><td>Qinggong leap</td></tr>
+    <tr><td>Mouse</td><td>Aim — further = more power</td></tr>
+    <tr><td>Click</td><td>Cast spell</td></tr>
+    <tr><td>1 – 4</td><td>Choose spell</td></tr>
+    <tr><td>Space</td><td>Focus camera on you</td></tr>
+    <tr><td>Right-drag</td><td>Look around</td></tr>
+    <tr><td>Wheel</td><td>Zoom</td></tr>
+  </table>
 </div>
 
 <!-- ── GAME CANVAS ───────────────────────────────── -->

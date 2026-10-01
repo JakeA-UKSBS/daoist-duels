@@ -122,7 +122,7 @@ class GameRoom {
           Terrain.settle(this.terrain, p);
           Terrain.walk(this.terrain, p, dir * knockback * (0.3 + 0.7 * falloff));
         }
-        hits.push({ name: p.name, dmg });
+        hits.push({ id: p.id, name: p.name, dmg });
       }
     });
     return hits;

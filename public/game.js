@@ -181,20 +181,22 @@ socket.on('projectile_result', ({ path, landX, landY, spell, radius, hits, falle
       const p = room.players.find(p => p.id === u.id);
       if (p) Object.assign(p, u);
     });
-    const label = room.spells?.[spell]?.label || spell;
-    if (hits?.length) hits.forEach(h => log(`${label} hits ${h.name} for ${h.dmg}`));
-    else log(`${label} misses`);
+    (hits || []).forEach(h => {
+      const p = room.players.find(p => p.id === h.id);
+      if (p) floaters.push({ x: p.x, y: p.y - PLAYER_H - 14, text: `-${h.dmg}`, t0: Date.now() });
+    });
     (fallen || []).forEach(n => log(`${n} fell into the abyss!`));
     renderHpBars();
   };
-  projAnim = { path, idx: 0, landX, landY, spell, radius, apply, onDone: () => { projAnim = null; render(); } };
+  projAnim = { path, idx: 0, landX, landY, spell, radius, apply, onDone: () => { projAnim = null; followPlayer(room?.currentPlayerId); render(); } };
+  camFollow = () => projAnim && projAnim.path[Math.min(projAnim.idx, projAnim.path.length - 1)];
   animateProjectile();
 });
 
 socket.on('turn_changed', ({ currentPlayerId }) => {
   if (room) room.currentPlayerId = currentPlayerId;
   updateTurnInfo();
-  centreOnMe();
+  followPlayer(currentPlayerId);
   render();
 });
 
@@ -210,12 +212,14 @@ socket.on('error', (msg) => alert(msg));
 // ── Enter game ────────────────────────────────────────────────────────────────
 function enterGame() {
   cam.zoom = 1.2;
+  document.getElementById('controls').style.display = 'block';
   lobbyEl.style.display = 'none';
   gameEl.style.display = 'block';
   hudEl.style.display = 'flex';
   hpBarsEl.style.display = 'flex';
   logEl.style.display = 'block';
   centreOnMe();
+  followPlayer(room.currentPlayerId);
   updateTurnInfo();
   renderHpBars();
   render();
@@ -226,6 +230,7 @@ function enterGame() {
 let lastTime = 0;
 function gameLoop(ts) {
   lastTime = ts;
+  updateCamera();
   room?.players.forEach(p => {
     if (!p.jump) return;
     const pt = p.jump.path[Math.min(p.jump.i, p.jump.path.length - 1)];
@@ -245,19 +250,22 @@ function gameLoop(ts) {
 // ── Keyboard movement ─────────────────────────────────────────────────────────
 // Held keys send repeated move events — feels smooth like Worms
 window.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;   // typing in the lobby
   if (keys[e.key]) return; // already held
   keys[e.key] = true;
 
+  if (e.key === ' ') { e.preventDefault(); followPlayer(myId); return; }
+  if (e.key === 'h') { const c = document.getElementById('controls'); c.classList.toggle('hidden'); return; }
+  if (e.key >= '1' && e.key <= '4') { document.querySelectorAll('.spell-btn')[Number(e.key) - 1]?.click(); return; }
   if (!isMyTurn() || projAnim) return;
 
-  if (e.key === 'ArrowLeft'  || e.key === 'a') startMoving(-1);
-  if (e.key === 'ArrowRight' || e.key === 'd') startMoving(1);
-  if (e.key === ' ') { e.preventDefault(); fireSpell(); }
+  if (e.key === 'ArrowLeft'  || e.key === 'a') { followPlayer(myId); startMoving(-1); }
+  if (e.key === 'ArrowRight' || e.key === 'd') { followPlayer(myId); startMoving(1); }
   const jumpKind = (e.key === 'ArrowUp' || e.key === 'w') ? 'hop' : (e.key === 'q' || e.key === 'ArrowDown') ? 'leap' : null;
   if (jumpKind) {
     e.preventDefault();
     const me = myPlayer();
-    if (me && !me.jump) { stopMoving(); socket.emit('jump', { kind: jumpKind }); }
+    if (me && !me.jump) { stopMoving(); followPlayer(myId); socket.emit('jump', { kind: jumpKind }); }
   }
 });
 
@@ -333,6 +341,7 @@ canvas.addEventListener('click', e => {
 canvas.addEventListener('mousedown', e => {
   if (e.button === 1 || e.button === 2) {
     panning = true;
+    camFollow = null;
     panStart = { x: e.clientX, y: e.clientY, camX: cam.x, camY: cam.y };
     e.preventDefault();
   }
@@ -350,6 +359,7 @@ canvas.addEventListener('mouseup', e => {
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
 canvas.addEventListener('wheel', e => {
+  camFollow = null;
   const before = screenToWorld(e.clientX, e.clientY);
   cam.zoom = Math.max(0.25, Math.min(2, cam.zoom * (e.deltaY < 0 ? 1.1 : 0.9)));
   // Keep the point under cursor fixed
@@ -398,6 +408,40 @@ function clampCamera() {
   cam.y = worldH <= vh ? (worldH - vh) / 2 : Math.max(0, Math.min(worldH - vh, cam.y));
 }
 
+// Floating damage numbers (screen-space size, world-space position)
+const floaters = [];
+function drawFloaters() {
+  const now = Date.now();
+  for (let i = floaters.length - 1; i >= 0; i--) {
+    const f = floaters[i], age = (now - f.t0) / 1400;
+    if (age >= 1) { floaters.splice(i, 1); continue; }
+    const sx = (f.x - cam.x) * cam.zoom, sy = (f.y - cam.y) * cam.zoom - age * 50;
+    ctx.globalAlpha = 1 - age * age;
+    ctx.font = 'bold 26px Georgia';
+    ctx.textAlign = 'center';
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = '#2a0000';
+    ctx.strokeText(f.text, sx, sy);
+    ctx.fillStyle = '#ff4a3a';
+    ctx.fillText(f.text, sx, sy);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// Camera smoothly tracks whatever camFollow returns; manual pan/zoom stops it
+let camFollow = null;
+function followPlayer(id) {
+  camFollow = () => { const p = room?.players.find(p => p.id === id); return p && { x: p.x, y: p.y - PLAYER_H / 2 }; };
+}
+function updateCamera() {
+  const t = camFollow && camFollow();
+  if (!t) return;
+  const tx = t.x - (canvas.width / cam.zoom) / 2, ty = t.y - (canvas.height / cam.zoom) / 2;
+  cam.x += (tx - cam.x) * 0.12;
+  cam.y += (ty - cam.y) * 0.12;
+  clampCamera();
+}
+
 function centreOnMe() {
   const me = myPlayer();
   const target = me || room?.players[0];
@@ -423,6 +467,7 @@ function render() {
   sky.addColorStop(1, '#1a0828');
   ctx.fillStyle = sky;
   ctx.fillRect(0, 0, W, H);
+  drawScreenBackdrop(room.terrain, W, H);
 
   // World transform
   ctx.scale(cam.zoom, cam.zoom);
@@ -462,13 +507,7 @@ function render() {
 
   ctx.restore();
 
-  // HUD overlay: controls hint
-  if (isMyTurn() && !projAnim) {
-    ctx.fillStyle = 'rgba(240,208,128,0.7)';
-    ctx.font = '13px Georgia';
-    ctx.textAlign = 'left';
-    ctx.fillText('A/D walk  ·  W hop  ·  Q qinggong leap  ·  Move mouse to aim  ·  Click to fire  ·  Right-drag to pan  ·  Wheel to zoom', 12, canvas.height - 12);
-  }
+  drawFloaters();
 }
 
 // ── Terrain drawing ───────────────────────────────────────────────────────────
@@ -478,7 +517,7 @@ const terrainCanvas = document.createElement('canvas');
 const MAT_STYLE = [
   { body: ['#4b6e32', '#24361a'], top: '#9fd27c', top2: '#6a9a4a', edge: '#1d2c14' },   // earth + grass
   { body: ['#4d3f2f', '#2f261c'], top: '#7d6a52', top2: '#5e4e3b', edge: '#1e1812' },   // rock
-  { body: ['#dccf90', '#b8aa68'], top: '#f6efc8', top2: '#e8dda6', edge: '#6e6438' },   // bone
+  { body: ['#e9ddd1', '#cdbdae'], top: '#f8f1ea', top2: '#efe4d9', edge: '#a8968a' },   // bone (matches the spine art)
 ];
 
 // Parts of [a,b] not covered by any span in a neighbouring column
@@ -492,6 +531,17 @@ function uncovered(a, b, spans) {
   }
   if (y < b) out.push([y, b]);
   return out;
+}
+
+const artCache = {};
+function artImage(src) {
+  if (!artCache[src]) {
+    const img = new Image();
+    img.onload = () => { terrainDirty = true; };
+    img.src = src;
+    artCache[src] = img;
+  }
+  return artCache[src].complete && artCache[src].naturalWidth ? artCache[src] : null;
 }
 
 function buildTerrainCache() {
@@ -510,6 +560,7 @@ function buildTerrainCache() {
   t.cols.forEach((spans, c) => {
     const x = c * C;
     spans.forEach(([a, b, m]) => {
+      if (m === Terrain.MAT.ART) return;
       const st = MAT_STYLE[m], h = b - a;
       g.fillStyle = grads[m];
       g.fillRect(x, a, C, h);
@@ -526,6 +577,18 @@ function buildTerrainCache() {
         });
       }
     });
+  });
+
+  // Artwork terrain (e.g. the spine): paint the image, clipped to what's left of it
+  (t.images || []).forEach(im => {
+    const img = artImage(im.src);
+    if (!img) return;
+    g.save();
+    g.beginPath();
+    t.cols.forEach((spans, c) => spans.forEach(([a, b, m]) => { if (m === Terrain.MAT.ART) g.rect(c * C, a, C, b - a); }));
+    g.clip();
+    g.drawImage(img, im.x, im.y, im.w, im.h);
+    g.restore();
   });
 
   // Decorations — only where the ground under them still exists
@@ -607,24 +670,27 @@ function drawDecor(g, d) {
   g.restore();
 }
 
+// Painted backdrops are drawn screen-sized with gentle parallax (like Worms),
+// so they stay crisp and don't get mistaken for terrain
+function drawScreenBackdrop(t, W, H) {
+  const bg = bgImage(t.bg);
+  if (!bg) return false;
+  const sc = Math.max(W / bg.naturalWidth, H / bg.naturalHeight) * 1.15;
+  const w = bg.naturalWidth * sc, h = bg.naturalHeight * sc;
+  const px = Math.max(0, Math.min(1, cam.x / Math.max(1, t.worldW - W / cam.zoom)));
+  const py = Math.max(0, Math.min(1, cam.y / Math.max(1, t.worldH - H / cam.zoom)));
+  ctx.drawImage(bg, -(w - W) * px, -(h - H) * py, w, h);
+  return true;
+}
+
 function drawBackground(t) {
-  if (t.theme === 'jade') {
-    ctx.fillStyle = '#dfe9e4';
-    ctx.fillRect(0, 0, t.worldW, t.worldH);
-    const bg = bgImage(t.bg);
-    if (bg) {
-      const sc = Math.max(t.worldW / bg.naturalWidth, t.worldH / bg.naturalHeight);
-      const w = bg.naturalWidth * sc, h = bg.naturalHeight * sc;
-      ctx.drawImage(bg, (t.worldW - w) / 2, t.worldH - h, w, h);
-    }
-  } else {
-    const g = ctx.createLinearGradient(0, 0, 0, t.worldH);
-    g.addColorStop(0, '#120b09');
-    g.addColorStop(0.6, '#1d100b');
-    g.addColorStop(1, '#4a1606');
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, t.worldW, t.worldH);
-  }
+  if (t.bg) return;   // drawn in screen space instead
+  const g = ctx.createLinearGradient(0, 0, 0, t.worldH);
+  g.addColorStop(0, '#120b09');
+  g.addColorStop(0.6, '#1d100b');
+  g.addColorStop(1, '#4a1606');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, t.worldW, t.worldH);
 }
 
 function drawLiquid(t) {
@@ -722,9 +788,13 @@ function drawPlayer(p) {
   ctx.fillStyle = p.color;
   ctx.fillText(p.name, x, top - 10);
 
-  // HP bar
+  // HP bar — the lost chunk drains away after a hit
+  if (p.hpShown === undefined || p.hpShown < p.hp) p.hpShown = p.hp;
+  p.hpShown += (p.hp - p.hpShown) * 0.04;
   ctx.fillStyle = '#222';
   ctx.fillRect(x - 20, top - 8, 40, 5);
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(x - 20, top - 8, 40 * p.hpShown / 100, 5);
   ctx.fillStyle = hpColor(p.hp);
   ctx.fillRect(x - 20, top - 8, 40 * p.hp / 100, 5);
 

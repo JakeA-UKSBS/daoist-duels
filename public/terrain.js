@@ -6,7 +6,7 @@
   const COL = 4;          // column width in px
   const STEP_UP = 14;     // tallest ledge you can just walk up
   const PLAYER_H = 40;    // character height — maps are ~100 characters wide, like Worms
-  const MAT = { EARTH: 0, ROCK: 1, BONE: 2 };
+  const MAT = { EARTH: 0, ROCK: 1, BONE: 2, ART: 3 };   // ART = drawn from an image (t.images)
 
   // Cheap deterministic wobble so edges aren't ruler-straight
   const wob = (x, s = 0) => Math.sin(x * 0.013 + s) * 0.5 + Math.sin(x * 0.037 + s * 2.1) * 0.3 + Math.sin(x * 0.091 + s * 3.7) * 0.2;
@@ -192,56 +192,45 @@
 
   function buildDragon() {
     const t = blank(4000, 1800);
-    t.bg = null;
-    t.theme = 'cave';
+    t.bg = '/assets/maps/dragons_spine.jpg';
+    t.theme = 'image';
     t.liquid = { y: 1680, type: 'lava' };
-    const R = MAT.ROCK, B = MAT.BONE, H = t.worldH;
+    const R = MAT.ROCK, B = MAT.BONE;
 
-    // Cave walls
-    addSolid(t, R, 0, 100, () => 0, () => H);
-    addSolid(t, R, 3900, 4000, () => 0, () => H);
+    // The spine itself is the artwork — its shape was traced into spine_mask.json
+    const spine = require('./assets/maps/spine_mask.json');
+    spine.cols.forEach(([c, spans]) => spans.forEach(([a, b]) => t.cols[c] && t.cols[c].push([a, b, MAT.ART])));
+    t.images = [{ src: spine.src, x: spine.x, y: spine.y, w: spine.w, h: spine.h }];
 
-    // Ceiling with three alcoves cut up into it, stalactites elsewhere
-    const pockets = [[350, 650], [1500, 1800], [2700, 3000]];
-    const nearPocket = x => pockets.some(([a, b]) => x > a - 150 && x < b + 320);
-    addSolid(t, R, 100, 3900, () => 0, x => {
-      if (pockets.some(([a, b]) => x >= a && x <= b)) return 540 + wob(x, 3) * 10;
-      let y = 650 + wob(x, 5) * 12;
-      if (!nearPocket(x)) {
-        const k = ((x % 150) + 150) % 150;
-        y += Math.max(0, 55 - Math.abs(k - 75) * 3);
-      }
-      return y;
-    });
-    // Alcove balconies stick out to the right; a rock outcrop below each lets you leap up
-    pockets.forEach(([a, b]) => {
-      addSolid(t, R, a, b + 140, x => 740 + wob(x, a) * 3, x => 772 + Math.min(16, (b + 140 - x) * 0.4));
-      addSolid(t, R, b + 160, b + 320, x => 1010 + wob(x, b) * 4, x => {
-        const u = (x - b - 160) / 160;
-        return 1040 + 50 * Math.sin(u * Math.PI);
-      });
-    });
-    // Extra cover in the open
-    [[1150, 1300], [2350, 2500]].forEach(([a, b]) => addSolid(t, R, a, b, x => 1090 + wob(x, a) * 4, x => 1120 + 40 * Math.sin((x - a) / (b - a) * Math.PI)));
-
-    // The spine — walkable, with vertebra spikes you can hop over
-    const spike = x => { const k = ((x - 100) % 200 + 200) % 200; return Math.max(0, 38 - Math.abs(k - 100) * 1.7); };
-    addSolid(t, B, 100, 3150, x => 1250 + wob(x, 7) * 5 - spike(x), () => 1330);
-
-    // Ribs curling down towards the lava
-    for (let cx = 260; cx < 3100; cx += 200) {
+    // Ribs curling down from the underside of the spine towards the lava
+    const underside = x => { const sp = t.cols[Math.floor(x / COL)] || []; return sp.length ? Math.max(...sp.map(q => q[1])) : null; };
+    for (let cx = 420; cx < 3000; cx += 180) {
+      const y0 = underside(cx);
+      if (y0 === null) continue;
       const len = 110;
-      const top = x => 1320 + 230 * Math.sin(Math.max(0, (cx - x) / len) * Math.PI / 2);
+      const top = x => y0 - 6 + 220 * Math.sin(Math.max(0, (cx - x) / len) * Math.PI / 2);
       addSolid(t, B, cx - len, cx + 4, top, x => {
         const slope = Math.abs(top(x + 2) - top(x - 2)) / 4;
-        return top(x) + 20 + Math.min(30, slope * COL * 1.5);
+        return top(x) + 18 + Math.min(30, slope * COL * 1.5);
       });
     }
+
+    // Floating rock alcoves to hide in — floor, back wall and roof, open on one side
+    const alcove = (a, F, openRight) => {
+      const w = 230, b = a + w;
+      addSolid(t, R, a, b, x => F + wob(x, a) * 3, x => F + 30 + Math.min(16, Math.min(x - a, b - x) * 0.4));
+      const [wa, wb] = openRight ? [a, a + 28] : [b - 28, b];
+      addSolid(t, R, wa, wb, () => F - 140, () => F + 2);
+      const [ra, rb] = openRight ? [a, b - 60] : [a + 60, b];
+      addSolid(t, R, ra, rb, x => F - 160 + wob(x, F) * 4, x => F - 120 + Math.min(10, Math.min(x - ra, rb - x) * 0.3));
+    };
+    alcove(640, 860, true); alcove(1150, 850, false); alcove(2640, 870, false);
+    addSolid(t, R, 1980, 2220, x => 640 + wob(x, 4) * 3, x => 672 + 30 * Math.sin((x - 1980) / 240 * Math.PI));  // high perch
 
     // Dragon skull: cranium with swept-back horn, long snout, open jaw
     const CX = 3450, CY = 1230;
     const cranium = x => { const u = (x - CX) / 190; return Math.sqrt(Math.max(0, 1 - u * u)); };
-    addSolid(t, B, 3100, 3300, x => 1250 - (x - 3100) * 0.75 + wob(x, 2) * 3, () => 1330);       // neck ramp
+    addSolid(t, B, 3080, 3300, x => 1262 - (x - 3080) * 0.72 + wob(x, 2) * 3, () => 1330);       // neck ramp
     addSolid(t, B, CX - 190, CX + 190, x => CY - 210 * cranium(x), x => CY + 100 * cranium(x));
     addSolid(t, B, 3362, 3530, x => x < 3400 ? 880 + (3400 - x) * 4 : 880 + (x - 3400) * 1.3, () => 1120); // horn
     addSolid(t, B, 3560, 3880, x => {
@@ -255,7 +244,7 @@
     t.decor.push({ type: 'teeth', x: 3580, y: 1285, w: 240 });
     t.decor.push({ type: 'nostril', x: 3845, y: 1215 });
 
-    t.spawns = [[400, 1200], [3700, 1100], [1650, 700], [2600, 1200], [500, 700], [2850, 700]];
+    t.spawns = [[330, 800], [3700, 1100], [760, 700], [2100, 800], [2760, 700], [1000, 950]];
     return t;
   }
 
