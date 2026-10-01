@@ -150,12 +150,16 @@
   <h1>⚔ Daoist Duels</h1>
   <p class="sub">Turn-based artillery — Wuxia style</p>
   <input id="name-input" type="text" placeholder="Your Daoist name" maxlength="20">
+  <div style="display:flex;align-items:center;gap:16px;margin-left:136px">
   <select id="char-select">
     <option value="0">Cultivator</option>
     <option value="1">Sage</option>
     <option value="2">Geisha</option>
     <option value="3">Lucky Cat</option>
   </select>
+  <img id="char-preview" src="/assets/characters/cultivator.png" alt=""
+       style="height:120px;width:120px;object-fit:contain;filter:drop-shadow(0 0 10px #f0a04066)">
+  </div>
   <div id="mode-row" style="display:flex;gap:12px">
     <button id="bots-btn">☯ Play vs Bots</button>
     <button id="friends-btn" style="background:#2c5d8a">🏯 Invite Friends</button>

@@ -87,6 +87,10 @@ $('friends-btn').addEventListener('click', () => {
   if (!$('room-input').value) $('room-input').value = randomCode();
 });
 $('join-btn').addEventListener('click', () => joinRoom($('room-input').value.trim() || randomCode()));
+const CHAR_FILES = ['cultivator', 'sage', 'geisha', 'lucky_cat'];
+$('char-select').addEventListener('change', e => {
+  $('char-preview').src = `/assets/characters/${CHAR_FILES[e.target.value]}.png`;
+});
 $('add-bot-btn').addEventListener('click', () => socket.emit('add_bot'));
 // Invite links: ?room=abc drops you straight into the join step
 const linkRoom = new URLSearchParams(location.search).get('room');
