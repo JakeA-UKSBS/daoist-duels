@@ -169,8 +169,19 @@ socket.on('player_aimed', ({ id, angle, power }) => {
   render();
 });
 
+// Wind-up before a spell launches
+let castAnim = null;
+socket.on('casting', ({ id, spell, facing }) => {
+  const p = room?.players.find(p => p.id === id);
+  if (p) p.facing = facing;
+  stopMoving();
+  const c = castAnim = { id, spell, t0: Date.now() };
+  setTimeout(() => { if (castAnim === c) castAnim = null; }, 2000);   // safety if the cast is cancelled
+});
+
 socket.on('projectile_result', ({ path, landX, landY, spell, radius, hits, fallen, carve, players }) => {
   stopMoving();
+  castAnim = null;
   // Apply the result only once the projectile lands, so the crater/knockback
   // appear with the explosion rather than before it
   const apply = () => {
@@ -398,7 +409,7 @@ function fireSpell() {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function isMyTurn() {
-  return room?.phase === 'playing' && room?.currentPlayerId === myId;
+  return room?.phase === 'playing' && room?.currentPlayerId === myId && !castAnim;
 }
 function myPlayer() {
   return room?.players.find(p => p.id === myId);
@@ -489,6 +500,7 @@ function render() {
   ctx.drawImage(terrainCanvas, 0, 0);
 
   room.players.forEach(p => drawPlayer(p));
+  if (castAnim) drawCasting(castAnim);
   drawLiquid(room.terrain);
 
   // Aim indicator — dotted arc from current player outward to mouse
@@ -880,6 +892,29 @@ function drawAimIndicator(me) {
   ctx.strokeStyle = `rgba(255,180,40,${0.3 + aimPower / 200})`;
   ctx.lineWidth = 3;
   ctx.stroke();
+}
+
+// Energy gathering at the caster's hands: a tightening ring plus motes drawn inward
+function drawCasting(c) {
+  const p = room.players.find(p => p.id === c.id);
+  if (!p) return;
+  const k = Math.min(1, (Date.now() - c.t0) / 600);
+  const col = spellColor(c.spell);
+  const hx = p.x + (p.facing || 1) * 14, hy = p.y - PLAYER_H * 0.55;
+  const glow = ctx.createRadialGradient(hx, hy, 0, hx, hy, 10 + 22 * k);
+  glow.addColorStop(0, col);
+  glow.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.globalAlpha = 0.5 + 0.5 * k;
+  ctx.fillStyle = glow;
+  ctx.beginPath(); ctx.arc(hx, hy, 10 + 22 * k, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = col; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(hx, hy, 40 * (1 - k) + 6, 0, Math.PI * 2); ctx.stroke();
+  for (let i = 0; i < 8; i++) {
+    const a = i / 8 * Math.PI * 2 + k * 3, r = 46 * (1 - k) + 4;
+    ctx.beginPath(); ctx.arc(hx + Math.cos(a) * r, hy + Math.sin(a) * r, 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = col; ctx.fill();
+  }
+  ctx.globalAlpha = 1;
 }
 
 function spellColor(spell) {

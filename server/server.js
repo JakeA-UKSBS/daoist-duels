@@ -205,7 +205,7 @@ io.on('connection', (socket) => {
 
   socket.on('move', ({ direction }) => {
     const room = rooms[socket.data.roomId];
-    if (!room || room.phase !== 'playing') return;
+    if (!room || room.phase !== 'playing' || room.casting) return;
     const cp = room.currentPlayer();
     if (!cp || cp.id !== socket.id) return;
 
@@ -220,7 +220,7 @@ io.on('connection', (socket) => {
 
   socket.on('jump', ({ kind } = {}) => {
     const room = rooms[socket.data.roomId];
-    if (!room || room.phase !== 'playing') return;
+    if (!room || room.phase !== 'playing' || room.casting) return;
     const cp = room.currentPlayer();
     if (!cp || cp.id !== socket.id) return;
     const { path, alive } = Terrain.jump(room.terrain, cp, kind === 'leap' ? 'leap' : 'hop');
@@ -239,7 +239,20 @@ io.on('connection', (socket) => {
 });
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+// Short wind-up so everyone sees the cast coming before the spell flies
+const CAST_DELAY = 600;
 function doFire(room, cp, spell, angle, power) {
+  if (room.casting) return;
+  room.casting = true;
+  if (angle !== undefined) cp.facing = Math.cos(angle * Math.PI / 180) >= 0 ? 1 : -1;
+  io.to(room.id).emit('casting', { id: cp.id, spell, facing: cp.facing });
+  setTimeout(() => {
+    room.casting = false;
+    if (room.phase === 'playing' && room.currentPlayer()?.id === cp.id && cp.hp > 0) launch(room, cp, spell, angle, power);
+  }, CAST_DELAY);
+}
+
+function launch(room, cp, spell, angle, power) {
   // Use angle/power sent with fire event (from mouse aim), fall back to stored
   if (angle !== undefined) cp.angle = angle;
   if (power !== undefined) cp.power = power;
