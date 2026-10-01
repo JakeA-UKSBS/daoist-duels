@@ -15,28 +15,10 @@ app.use(express.static(path.join(__dirname, '../public')));
 // ─── Game constants ───────────────────────────────────────────────────────────
 const GRAVITY  = 600;   // px / s²
 const MAX_PLAYERS = 6;
-const SEGMENTS = 192;   // terrain resolution
 const PLAYER_H = 64;    // sprite height; body centre is PLAYER_H/2 above feet
 
-// ─── Maps ─────────────────────────────────────────────────────────────────────
-// profile = ground line sampled from the background art (65 evenly spaced points)
-const MAPS = {
-  jade_mountain: {
-    name: 'Jade Mountain',
-    bg: '/assets/maps/jade_mountain.jpg',
-    worldW: 1920, worldH: 1060,
-    profile: [876,876,876,876,876,876,876,876,877,876,877,876,899,910,923,933,941,943,947,949,952,959,966,968,968,967,966,964,962,958,954,949,940,934,932,939,941,940,934,942,942,942,942,942,942,942,942,942,942,942,941,941,942,942,942,942,942,940,940,942,942,942,942,941,942],
-  },
-  crimson_peaks: {
-    name: 'Crimson Peaks',
-    bg: null,
-    worldW: 2560, worldH: 1440,
-    profile: Array.from({ length: 65 }, (_, i) => {
-      const t = i / 64;
-      return Math.floor((0.55 + 0.12 * Math.sin(t * Math.PI * 3) + 0.05 * Math.sin(t * Math.PI * 7)) * 1440);
-    }),
-  },
-};
+// ─── Maps / terrain (shared with the browser) ─────────────────────────────────
+const Terrain = require('../public/terrain.js');
 
 // ─── Spells ───────────────────────────────────────────────────────────────────
 // gravity/speed are multipliers; carve = how deep the crater is; knockback in px
@@ -60,29 +42,17 @@ class GameRoom {
   }
 
   setMap(key) {
-    const map = MAPS[key] || MAPS.jade_mountain;
-    this.mapKey = MAPS[key] ? key : 'jade_mountain';
-    const { profile, worldW, worldH } = map;
-    const heights = [];
-    for (let i = 0; i <= SEGMENTS; i++) {
-      const f = (i / SEGMENTS) * (profile.length - 1);
-      const j = Math.floor(f), fr = f - j;
-      const a = profile[j], b = profile[Math.min(j + 1, profile.length - 1)];
-      heights.push(a + (b - a) * fr);
-    }
-    this.terrain = {
-      type: 'heightmap', map: this.mapKey, name: map.name, bg: map.bg,
-      heights, base: heights.slice(), segments: SEGMENTS, worldW, worldH,
-    };
+    this.terrain = Terrain.buildMap(key);
+    this.mapKey = this.terrain.map;
     this.spreadPlayers();
   }
 
   spreadPlayers() {
-    const { worldW } = this.terrain;
-    const n = this.players.length;
+    const { worldW, spawns } = this.terrain;
     this.players.forEach((p, i) => {
-      p.x = n <= 1 ? worldW / 2 : 150 + (worldW - 300) * i / (n - 1);
-      p.y = this.terrainYAt(p.x) - 1;
+      const [x, hintY] = spawns[i % spawns.length];
+      p.x = x + Math.floor(i / spawns.length) * 30;
+      p.y = Terrain.groundBelow(this.terrain, p.x, hintY) ?? 0;
       p.facing = p.x < worldW / 2 ? 1 : -1;
     });
   }
@@ -107,24 +77,12 @@ class GameRoom {
     return player;
   }
 
-  terrainYAt(x) {
-    const { heights, segments, worldW } = this.terrain;
-    const t = Math.max(0, Math.min(1, x / worldW));
-    const fi = t * segments;
-    const i = Math.floor(fi);
-    const frac = fi - i;
-    const h0 = heights[Math.min(i, segments)];
-    const h1 = heights[Math.min(i + 1, segments)];
-    return h0 + (h1 - h0) * frac;
-  }
-
-  // Players standing over a hole dug to the bottom of the world fall into the abyss
+  // Drop everyone onto whatever is under them; anyone who lands in liquid/abyss is out
   checkFalls() {
     const fallen = [];
     this.players.forEach(p => {
       if (p.hp <= 0) return;
-      p.y = this.terrainYAt(p.x) - 1;
-      if (p.y >= this.terrain.worldH - 4) { p.hp = 0; fallen.push(p.name); }
+      if (!Terrain.settle(this.terrain, p)) { p.hp = 0; fallen.push(p.name); }
     });
     return fallen;
   }
@@ -146,17 +104,7 @@ class GameRoom {
 
   applyExplosion(x, y, spell) {
     const { radius, damage, carve, knockback } = spell;
-    const { heights, segments, worldW, worldH } = this.terrain;
-
-    // Carve terrain heightmap
-    for (let i = 0; i <= segments; i++) {
-      const dx = (i / segments) * worldW - x;
-      if (Math.abs(dx) < radius) {
-        const depth = Math.sqrt(radius * radius - dx * dx) * carve;
-        // only carve if the blast actually reaches the surface here
-        if (y + depth > heights[i]) heights[i] = Math.min(worldH, Math.max(heights[i], y + depth));
-      }
-    }
+    Terrain.carve(this.terrain, x, y, radius * carve);
 
     // Damage + knockback, measured from each player's body centre
     const hits = [];
@@ -171,7 +119,8 @@ class GameRoom {
         p.hp = Math.max(0, p.hp - dmg);
         if (knockback) {
           const dir = dx === 0 ? (Math.random() < 0.5 ? -1 : 1) : Math.sign(dx);
-          p.x = Math.max(20, Math.min(worldW - 20, p.x + dir * knockback * (0.3 + 0.7 * falloff)));
+          Terrain.settle(this.terrain, p);
+          Terrain.walk(this.terrain, p, dir * knockback * (0.3 + 0.7 * falloff));
         }
         hits.push({ name: p.name, dmg });
       }
@@ -259,13 +208,24 @@ io.on('connection', (socket) => {
     const cp = room.currentPlayer();
     if (!cp || cp.id !== socket.id) return;
 
-    const speed = 10;
-    cp.x = Math.max(20, Math.min(room.terrain.worldW - 20, cp.x + direction * speed));
-    cp.facing = direction;
-    const fell = room.checkFalls().length > 0;
+    const dir = direction < 0 ? -1 : 1;
+    cp.facing = dir;
+    const fell = !Terrain.walk(room.terrain, cp, dir * 10);
+    if (fell) cp.hp = 0;
 
     io.to(room.id).emit('player_moved', { id: socket.id, x: cp.x, y: cp.y, facing: cp.facing, hp: cp.hp });
     if (fell) endTurn(room);
+  });
+
+  socket.on('jump', () => {
+    const room = rooms[socket.data.roomId];
+    if (!room || room.phase !== 'playing') return;
+    const cp = room.currentPlayer();
+    if (!cp || cp.id !== socket.id) return;
+    const { path, alive } = Terrain.jump(room.terrain, cp);
+    if (!alive) cp.hp = 0;
+    io.to(room.id).emit('player_jumped', { id: cp.id, path, x: cp.x, y: cp.y, facing: cp.facing, hp: cp.hp });
+    if (!alive) endTurn(room, path.length / 60 * 1000);
   });
 
   socket.on('disconnect', () => {
@@ -308,7 +268,7 @@ function doFire(room, cp, spell, angle, power) {
     radius: sp.radius,
     hits,
     fallen,
-    terrain: room.terrain,
+    carve: sp.radius * sp.carve,
     players: room.players.map(p => ({ id: p.id, hp: p.hp, x: p.x, y: p.y, facing: p.facing })),
   });
 
@@ -345,7 +305,7 @@ function endTurn(room, delay = 0) {
 function roomStateFor(room) {
   return {
     spells: SPELLS,
-    maps: Object.fromEntries(Object.entries(MAPS).map(([k, m]) => [k, m.name])),
+    maps: Object.fromEntries(Object.entries(Terrain.MAPS).map(([k, m]) => [k, m.name])),
     id: room.id,
     phase: room.phase,
     players: room.players,
@@ -368,7 +328,9 @@ function simulateProjectile(proj, room, ownerId) {
 
     if (i % 3 === 0) path.push({ x: Math.round(x), y: Math.round(y) });
 
-    if (y >= room.terrainYAt(x) || x < 0 || x > worldW || y > worldH) break;
+    if (x < 0 || x > worldW || y > worldH) break;
+    if (Terrain.isSolid(room.terrain, x, y)) break;
+    if (room.terrain.liquid && y >= room.terrain.liquid.y) { y = room.terrain.liquid.y; break; }
 
     // Direct hit on a player's body (ignore the caster for the first moments)
     const hit = room.players.some(p => p.hp > 0 && (p.id !== ownerId || i > 30) &&

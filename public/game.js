@@ -141,6 +141,7 @@ socket.on('player_left', ({ id }) => {
 
 socket.on('game_started', ({ room: r }) => {
   room = r;
+  terrainDirty = true;
   enterGame();
 });
 
@@ -157,19 +158,25 @@ socket.on('player_moved', ({ id, x, y, facing, hp }) => {
   render();
 });
 
+socket.on('player_jumped', ({ id, path, x, y, facing, hp }) => {
+  const p = room?.players.find(p => p.id === id);
+  if (p) p.jump = { path, i: 0, end: { x, y, facing, hp } };
+});
+
 socket.on('player_aimed', ({ id, angle, power }) => {
   const p = room?.players.find(p => p.id === id);
   if (p) { p.angle = angle; p.power = power; }
   render();
 });
 
-socket.on('projectile_result', ({ path, landX, landY, spell, radius, hits, fallen, terrain, players }) => {
+socket.on('projectile_result', ({ path, landX, landY, spell, radius, hits, fallen, carve, players }) => {
   stopMoving();
   // Apply the result only once the projectile lands, so the crater/knockback
   // appear with the explosion rather than before it
   const apply = () => {
     if (!room) return;
-    room.terrain = terrain;
+    Terrain.carve(room.terrain, landX, landY, carve);
+    terrainDirty = true;
     players.forEach(u => {
       const p = room.players.find(p => p.id === u.id);
       if (p) Object.assign(p, u);
@@ -218,6 +225,18 @@ function enterGame() {
 let lastTime = 0;
 function gameLoop(ts) {
   lastTime = ts;
+  room?.players.forEach(p => {
+    if (!p.jump) return;
+    const pt = p.jump.path[Math.min(p.jump.i, p.jump.path.length - 1)];
+    if (pt) { p.x = pt.x; p.y = pt.y; }
+    p.jump.i += 1;
+    if (p.jump.i >= p.jump.path.length) {
+      Object.assign(p, p.jump.end);
+      if (p.hp <= 0) log(`${p.name} fell to their doom!`);
+      renderHpBars();
+      p.jump = null;
+    }
+  });
   render();
   requestAnimationFrame(gameLoop);
 }
@@ -233,6 +252,11 @@ window.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft'  || e.key === 'a') startMoving(-1);
   if (e.key === 'ArrowRight' || e.key === 'd') startMoving(1);
   if (e.key === ' ') { e.preventDefault(); fireSpell(); }
+  if (e.key === 'ArrowUp' || e.key === 'w') {
+    e.preventDefault();
+    const me = myPlayer();
+    if (me && !me.jump) { stopMoving(); socket.emit('jump'); }
+  }
 });
 
 window.addEventListener('keyup', e => {
@@ -259,10 +283,9 @@ function doMove(dir) {
   if (!me) return;
 
   // Client-side prediction: move locally immediately
-  const speed = 10;
-  me.x = Math.max(20, Math.min(room.terrain.worldW - 20, me.x + dir * speed));
-  me.y = terrainYAt(me.x) - 1;
+  if (me.jump) return;
   me.facing = dir;
+  Terrain.walk(room.terrain, me, dir * 10);
 
   socket.emit('move', { direction: dir });
   render();
@@ -346,7 +369,7 @@ document.querySelectorAll('.spell-btn').forEach(btn => {
 });
 
 function fireSpell() {
-  if (!isMyTurn() || projAnim) return;
+  if (!isMyTurn() || projAnim || myPlayer()?.jump) return;
   socket.emit('fire', { spell: selectedSpell, angle: aimAngle, power: aimPower });
 }
 
@@ -356,18 +379,6 @@ function isMyTurn() {
 }
 function myPlayer() {
   return room?.players.find(p => p.id === myId);
-}
-
-function terrainYAt(x) {
-  if (!room) return 0;
-  const { heights, segments, worldW } = room.terrain;
-  const t = Math.max(0, Math.min(1, x / worldW));
-  const fi = t * segments;
-  const i = Math.floor(fi);
-  const frac = fi - i;
-  const h0 = heights[Math.min(i, segments)];
-  const h1 = heights[Math.min(i + 1, segments)];
-  return h0 + (h1 - h0) * frac;
 }
 
 function screenToWorld(sx, sy) {
@@ -398,12 +409,12 @@ function centreOnMe() {
 function render() {
   if (!room) return;
   const W = canvas.width, H = canvas.height;
-  const { worldW, worldH, heights, segments } = room.terrain;
+  const { worldW, worldH } = room.terrain;
 
   ctx.save();
   ctx.clearRect(0, 0, W, H);
 
-  // Sky gradient
+  // Sky gradient (outside the world)
   const sky = ctx.createLinearGradient(0, 0, 0, H);
   sky.addColorStop(0, '#0d0520');
   sky.addColorStop(0.6, '#2a0d4a');
@@ -415,15 +426,12 @@ function render() {
   ctx.scale(cam.zoom, cam.zoom);
   ctx.translate(-cam.x, -cam.y);
 
-  const bg = bgImage(room.terrain.bg);
-  if (bg) {
-    ctx.drawImage(bg, 0, 0, worldW, worldH);
-    drawCraters(worldW, worldH, heights, segments, room.terrain.base);
-  } else {
-    drawTerrain(worldW, worldH, heights, segments);
-  }
+  drawBackground(room.terrain);
+  if (terrainDirty) buildTerrainCache();
+  ctx.drawImage(terrainCanvas, 0, 0);
 
   room.players.forEach(p => drawPlayer(p));
+  drawLiquid(room.terrain);
 
   // Aim indicator — dotted arc from current player outward to mouse
   if (isMyTurn() && !projAnim) {
@@ -457,88 +465,195 @@ function render() {
     ctx.fillStyle = 'rgba(240,208,128,0.7)';
     ctx.font = '13px Georgia';
     ctx.textAlign = 'left';
-    ctx.fillText('A/D or ←/→ to walk  ·  Move mouse to aim  ·  Click to fire  ·  Right-drag to pan  ·  Wheel to zoom', 12, canvas.height - 12);
+    ctx.fillText('A/D to walk  ·  W to jump  ·  Move mouse to aim  ·  Click to fire  ·  Right-drag to pan  ·  Wheel to zoom', 12, canvas.height - 12);
   }
 }
 
-// Image maps: the painted ground stays as-is; blasted-out areas are drawn as dark earth
-function drawCraters(worldW, worldH, heights, segments, base) {
-  if (!base) return;
-  const step = worldW / segments;
-  ctx.beginPath();
-  for (let i = 0; i <= segments; i++) ctx.lineTo(i * step, base[i]);
-  for (let i = segments; i >= 0; i--) ctx.lineTo(i * step, heights[i]);
-  ctx.closePath();
-  const g = ctx.createLinearGradient(0, 850, 0, worldH);
-  g.addColorStop(0, '#6b5238');
-  g.addColorStop(1, '#2a1c10');
-  ctx.fillStyle = g;
-  ctx.fill();
+// ── Terrain drawing ───────────────────────────────────────────────────────────
+// Terrain only changes on explosions, so it's drawn once into an offscreen canvas
+let terrainDirty = true;
+const terrainCanvas = document.createElement('canvas');
+const MAT_STYLE = [
+  { body: ['#4b6e32', '#24361a'], top: '#9fd27c', top2: '#6a9a4a', edge: '#1d2c14' },   // earth + grass
+  { body: ['#4d3f2f', '#2f261c'], top: '#7d6a52', top2: '#5e4e3b', edge: '#1e1812' },   // rock
+  { body: ['#dccf90', '#b8aa68'], top: '#f6efc8', top2: '#e8dda6', edge: '#6e6438' },   // bone
+];
 
-  // Abyss where the ground has been blasted right through
-  for (let i = 0; i < segments; i++) {
-    if (heights[i] >= worldH - 4 && heights[i + 1] >= worldH - 4) {
-      ctx.fillStyle = '#0a0612';
-      ctx.fillRect(i * step, worldH - 30, step + 1, 30);
+// Parts of [a,b] not covered by any span in a neighbouring column
+function uncovered(a, b, spans) {
+  const out = [];
+  let y = a;
+  for (const [s0, s1] of spans) {
+    if (s1 < y || s0 > b) continue;
+    if (s0 > y) out.push([y, s0]);
+    y = Math.max(y, s1);
+  }
+  if (y < b) out.push([y, b]);
+  return out;
+}
+
+function buildTerrainCache() {
+  terrainDirty = false;
+  const t = room.terrain, C = Terrain.COL;
+  terrainCanvas.width = t.worldW;
+  terrainCanvas.height = t.worldH;
+  const g = terrainCanvas.getContext('2d');
+  const grads = MAT_STYLE.map(st => {
+    const gr = g.createLinearGradient(0, 300, 0, t.worldH);
+    gr.addColorStop(0, st.body[0]);
+    gr.addColorStop(1, st.body[1]);
+    return gr;
+  });
+
+  t.cols.forEach((spans, c) => {
+    const x = c * C;
+    spans.forEach(([a, b, m]) => {
+      const st = MAT_STYLE[m], h = b - a;
+      g.fillStyle = grads[m];
+      g.fillRect(x, a, C, h);
+      // Lit top surface, dark underside
+      g.fillStyle = st.top2; g.fillRect(x, a, C, Math.min(10, h));
+      g.fillStyle = st.top;  g.fillRect(x, a, C, Math.min(4, h));
+      if (m === 2) { g.fillStyle = st.edge; g.fillRect(x, a, C, Math.min(2, h)); }
+      g.fillStyle = st.edge; g.fillRect(x, Math.max(a, b - 3), C, Math.min(3, h));
+      // Outline exposed sides
+      for (const [n, sx] of [[c - 1, x], [c + 1, x + C - 2]]) {
+        uncovered(a, b, t.cols[n] || []).forEach(([y0, y1]) => {
+          g.fillStyle = st.edge;
+          g.fillRect(sx, y0, 2, y1 - y0);
+        });
+      }
+    });
+  });
+
+  // Decorations — only where the ground under them still exists
+  t.decor.forEach(d => {
+    const probe = d.type === 'teeth' ? d.y - 3 : d.type === 'eye' ? d.y : d.y + 3;
+    if (Terrain.isSolid(t, d.x, probe)) drawDecor(g, d);
+  });
+}
+
+function drawDecor(g, d) {
+  const { x, y } = d;
+  g.save();
+  switch (d.type) {
+    case 'bamboo': {
+      [[-11, 120, '#5f8f3c'], [0, 155, '#6fa448'], [11, 105, '#56843a']].forEach(([ox, h, col]) => {
+        g.fillStyle = col;
+        g.fillRect(x + ox - 3, y - h, 6, h);
+        g.fillStyle = '#3c5e26';
+        for (let k = 22; k < h; k += 24) g.fillRect(x + ox - 4, y - k, 8, 2);
+        g.fillStyle = '#7fb85a';
+        for (let k = 0; k < 3; k++) {
+          g.beginPath();
+          g.ellipse(x + ox + (k % 2 ? 9 : -9), y - h + 10 + k * 14, 11, 3.5, k % 2 ? -0.5 : 0.5, 0, Math.PI * 2);
+          g.fill();
+        }
+      });
+      break;
     }
+    case 'boulder':
+      g.fillStyle = '#6f6b67'; g.beginPath(); g.arc(x - 8, y - 16, 20, 0, Math.PI * 2); g.fill();
+      g.fillStyle = '#8c8783'; g.beginPath(); g.arc(x + 8, y - 13, 15, 0, Math.PI * 2); g.fill();
+      g.fillStyle = 'rgba(255,255,255,0.18)'; g.beginPath(); g.arc(x - 13, y - 24, 7, 0, Math.PI * 2); g.fill();
+      break;
+    case 'cherry':
+      g.fillStyle = '#5a3a28';
+      g.beginPath(); g.moveTo(x - 5, y); g.lineTo(x - 2, y - 70); g.lineTo(x + 3, y - 70); g.lineTo(x + 6, y); g.fill();
+      g.fillRect(x - 1, y - 70, 22, 4);
+      [['#f4b6c8', -18, -82, 26], ['#f7c9d6', 12, -90, 28], ['#eda0b8', 28, -74, 20], ['#f9d6e0', -4, -104, 22]].forEach(([c, ox, oy, r]) => {
+        g.fillStyle = c; g.beginPath(); g.arc(x + ox, y + oy, r, 0, Math.PI * 2); g.fill();
+      });
+      break;
+    case 'pagoda': {
+      const tiers = [[56, 30], [46, 26], [36, 22]];
+      let yy = y;
+      tiers.forEach(([w, h]) => {
+        g.fillStyle = '#a03a22'; g.fillRect(x - w / 2 + 6, yy - h, w - 12, h);
+        g.fillStyle = '#2f6b4a';
+        g.beginPath(); g.moveTo(x - w / 2 - 10, yy - h + 4); g.lineTo(x + w / 2 + 10, yy - h + 4);
+        g.lineTo(x + w / 2 - 4, yy - h - 10); g.lineTo(x - w / 2 + 4, yy - h - 10); g.fill();
+        yy -= h + 10;
+      });
+      g.fillStyle = '#d4a93a'; g.fillRect(x - 2, yy - 18, 4, 18);
+      break;
+    }
+    case 'torii':
+      g.fillStyle = '#c2342a';
+      g.fillRect(x - 46, y - 110, 9, 110); g.fillRect(x + 37, y - 110, 9, 110);
+      g.fillRect(x - 54, y - 92, 108, 8);
+      g.fillStyle = '#2a1a16';
+      g.beginPath(); g.moveTo(x - 68, y - 118); g.lineTo(x + 68, y - 118); g.lineTo(x + 60, y - 106); g.lineTo(x - 60, y - 106); g.fill();
+      break;
+    case 'eye': {
+      g.fillStyle = '#1a0f08'; g.beginPath(); g.ellipse(x, y, 34, 28, 0, 0, Math.PI * 2); g.fill();
+      const eg = g.createRadialGradient(x, y, 0, x, y, 16);
+      eg.addColorStop(0, 'rgba(255,90,20,0.9)'); eg.addColorStop(1, 'rgba(255,40,0,0)');
+      g.fillStyle = eg; g.beginPath(); g.arc(x, y, 16, 0, Math.PI * 2); g.fill();
+      g.fillStyle = '#1a0f08'; g.beginPath(); g.ellipse(x - 70, y + 50, 10, 16, 0.3, 0, Math.PI * 2); g.fill();
+      break;
+    }
+    case 'teeth':
+      g.fillStyle = '#efe6b8'; g.strokeStyle = '#6e6438'; g.lineWidth = 1.5;
+      for (let tx = x; tx < x + d.w; tx += 18) {
+        g.beginPath(); g.moveTo(tx, y); g.lineTo(tx + 12, y); g.lineTo(tx + 6, y + 22); g.closePath(); g.fill(); g.stroke();
+      }
+      break;
   }
-
-  // Dark rim along the carved surface
-  ctx.beginPath();
-  for (let i = 0; i <= segments; i++) {
-    const y = heights[i];
-    if (y > base[i] + 1) ctx.lineTo(i * step, y); else ctx.moveTo(i * step, y);
-  }
-  ctx.strokeStyle = '#3d2a18';
-  ctx.lineWidth = 3;
-  ctx.stroke();
+  g.restore();
 }
 
-function drawTerrain(worldW, worldH, heights, segments) {
-  // Main terrain body
-  ctx.beginPath();
-  ctx.moveTo(0, heights[0]);
-  for (let i = 1; i <= segments; i++) {
-    ctx.lineTo((i / segments) * worldW, heights[i]);
+function drawBackground(t) {
+  if (t.theme === 'jade') {
+    ctx.fillStyle = '#dfe9e4';
+    ctx.fillRect(0, 0, t.worldW, t.worldH);
+    const bg = bgImage(t.bg);
+    if (bg) {
+      const sc = Math.max(t.worldW / bg.naturalWidth, t.worldH / bg.naturalHeight);
+      const w = bg.naturalWidth * sc, h = bg.naturalHeight * sc;
+      ctx.drawImage(bg, (t.worldW - w) / 2, t.worldH - h, w, h);
+    }
+  } else {
+    const g = ctx.createLinearGradient(0, 0, 0, t.worldH);
+    g.addColorStop(0, '#120b09');
+    g.addColorStop(0.6, '#1d100b');
+    g.addColorStop(1, '#4a1606');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, t.worldW, t.worldH);
   }
-  ctx.lineTo(worldW, worldH);
-  ctx.lineTo(0, worldH);
+}
+
+function drawLiquid(t) {
+  if (!t.liquid) return;
+  const ly = t.liquid.y, now = Date.now();
+  const wave = (x, amp, sp) => ly + Math.sin(x * 0.02 + now / sp) * amp;
+  ctx.beginPath();
+  ctx.moveTo(0, t.worldH);
+  for (let x = 0; x <= t.worldW; x += 16) ctx.lineTo(x, wave(x, 4, 400));
+  ctx.lineTo(t.worldW, t.worldH);
   ctx.closePath();
-
-  const grad = ctx.createLinearGradient(0, 0, 0, worldH);
-  grad.addColorStop(0, '#5a8a38');
-  grad.addColorStop(0.15, '#3d6022');
-  grad.addColorStop(0.5, '#2a4018');
-  grad.addColorStop(1, '#1a2810');
-  ctx.fillStyle = grad;
-  ctx.fill();
-
-  // Grass edge
+  if (t.liquid.type === 'lava') {
+    const g = ctx.createLinearGradient(0, ly, 0, t.worldH);
+    g.addColorStop(0, '#ff6a10'); g.addColorStop(0.3, '#d2380a'); g.addColorStop(1, '#6e1200');
+    ctx.fillStyle = g;
+    ctx.fill();
+    for (let i = 0; i < 10; i++) {
+      const lx = ((i / 10 + now / 40000) % 1) * t.worldW;
+      const lg = ctx.createRadialGradient(lx, ly + 15, 0, lx, ly + 15, 110);
+      lg.addColorStop(0, 'rgba(255,200,60,0.45)'); lg.addColorStop(1, 'rgba(255,80,0,0)');
+      ctx.fillStyle = lg;
+      ctx.fillRect(lx - 110, ly - 10, 220, 120);
+    }
+    ctx.strokeStyle = '#ffc050';
+  } else {
+    ctx.fillStyle = 'rgba(64,132,168,0.82)';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(220,245,255,0.8)';
+  }
+  ctx.lineWidth = 3;
   ctx.beginPath();
-  ctx.moveTo(0, heights[0]);
-  for (let i = 1; i <= segments; i++) {
-    ctx.lineTo((i / segments) * worldW, heights[i]);
-  }
-  ctx.strokeStyle = '#7ec840';
-  ctx.lineWidth = 4 / cam.zoom;
+  for (let x = 0; x <= t.worldW; x += 16) ctx.lineTo(x, wave(x, 4, 400));
   ctx.stroke();
-
-  // Lava
-  const lavaY = worldH - 50;
-  ctx.fillStyle = '#8b1a00';
-  ctx.fillRect(0, lavaY, worldW, 50);
-  // Animated lava glow strips
-  const t = Date.now() / 800;
-  for (let i = 0; i < 8; i++) {
-    const lx = ((i / 8 + t * 0.05) % 1) * worldW;
-    const lg = ctx.createRadialGradient(lx, lavaY + 10, 0, lx, lavaY + 10, 120);
-    lg.addColorStop(0, 'rgba(255,120,0,0.5)');
-    lg.addColorStop(1, 'rgba(255,0,0,0)');
-    ctx.fillStyle = lg;
-    ctx.fillRect(lx - 120, lavaY, 240, 50);
-  }
-  ctx.fillStyle = '#c0392b';
-  ctx.fillRect(0, lavaY, worldW, 8);
 }
 
 function drawPlayer(p) {
@@ -646,8 +761,8 @@ function drawAimIndicator(me) {
     px += vx * dt;
     py += vy * dt;
     if (i % 2 === 0) ctx.lineTo(px, py);
-    const ty = terrainYAt(px);
-    if (py >= ty || px < 0 || px > worldW || py > worldH) {
+    if (Terrain.isSolid(room.terrain, px, py) || (room.terrain.liquid && py >= room.terrain.liquid.y) ||
+        px < 0 || px > worldW || py > worldH) {
       // Draw landing X
       ctx.stroke();
       ctx.setLineDash([]);
