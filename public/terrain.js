@@ -4,8 +4,8 @@
 // ribs and skulls — and blast holes through any of them.
 (function (root) {
   const COL = 4;          // column width in px
-  const STEP_UP = 22;     // tallest ledge you can just walk up
-  const PLAYER_H = 64;
+  const STEP_UP = 14;     // tallest ledge you can just walk up
+  const PLAYER_H = 40;    // character height — maps are ~100 characters wide, like Worms
   const MAT = { EARTH: 0, ROCK: 1, BONE: 2 };
 
   // Cheap deterministic wobble so edges aren't ruler-straight
@@ -77,9 +77,11 @@
     return true;
   }
 
-  // Hop forward in the facing direction. Returns the path for animation.
-  function jump(t, p) {
-    let x = p.x, y = p.y, vx = 170 * (p.facing || 1), vy = -440;
+  // Jumps: 'hop' = short forward jump (~2 body heights), 'leap' = qinggong high leap (~7 body heights)
+  const JUMPS = { hop: { vx: 150, vy: -400 }, leap: { vx: 110, vy: -720 } };
+  function jump(t, p, kind = 'hop') {
+    const J = JUMPS[kind] || JUMPS.hop;
+    let x = p.x, y = p.y, vx = J.vx * (p.facing || 1), vy = J.vy;
     const dt = 1 / 60, path = [];
     for (let i = 0; i < 240; i++) {
       vy += 900 * dt;
@@ -117,112 +119,143 @@
   }
 
   // ─── Maps ─────────────────────────────────────────────────────────────────
+  // Worms-style proportions: 4000×1800 world with 40px characters, mostly one
+  // connected landmass. Gaps are hop-able, ledges are within a qinggong leap.
   const MAPS = {
     jade_mountain: { name: 'Jade Mountain', build: buildJade },
     dragons_spine: { name: "Dragon's Spine", build: buildDragon },
   };
 
+  // Smooth curve through control points [[x, y], ...]
+  const curve = pts => x => {
+    if (x <= pts[0][0]) return pts[0][1];
+    for (let i = 1; i < pts.length; i++) {
+      const [x1, y1] = pts[i];
+      if (x <= x1) {
+        const [x0, y0] = pts[i - 1];
+        const u = (1 - Math.cos(((x - x0) / (x1 - x0)) * Math.PI)) / 2;
+        return y0 + (y1 - y0) * u;
+      }
+    }
+    return pts[pts.length - 1][1];
+  };
+
+  // Dig a tunnel between two points
+  function tunnel(t, x0, y0, x1, y1, r) {
+    const n = Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 6);
+    for (let i = 0; i <= n; i++) carve(t, x0 + (x1 - x0) * i / n, y0 + (y1 - y0) * i / n, r);
+  }
+
+  const putDecor = (t, type, x, hintY = 0, extra = {}) => {
+    const y = groundBelow(t, x, hintY);
+    if (y !== null) t.decor.push({ type, x, y, ...extra });
+  };
+
   function buildJade() {
-    const t = blank(2560, 1440);
+    const t = blank(4000, 1800);
     t.bg = '/assets/maps/jade_mountain.jpg';
     t.theme = 'jade';
-    t.liquid = { y: 1250, type: 'water' };
+    t.liquid = { y: 1640, type: 'water' };
     const E = MAT.EARTH, H = t.worldH;
 
-    // Cliff islands rising out of the lake — rounded shoulders at the edges
-    const island = (x0, x1, top) => addSolid(t, E, x0, x1, x => {
+    // Rolling hills with a mountain in the middle; four narrow inlets you can hop over
+    const land = curve([[0, 1240], [250, 1215], [450, 1290], [600, 1400], [680, 1400], [880, 1260],
+      [1100, 1185], [1300, 1225], [1500, 1400], [1580, 1400], [1800, 1060], [1950, 905], [2080, 885],
+      [2220, 1010], [2420, 1200], [2600, 1400], [2680, 1400], [2900, 1150], [3100, 1180], [3360, 1400],
+      [3440, 1400], [3700, 1205], [4000, 1225]]);
+    const segs = [[0, 610], [670, 1510], [1570, 2610], [2670, 3370], [3430, 4000]];
+    segs.forEach(([x0, x1]) => addSolid(t, E, x0, x1, x => {
       const edge = Math.min(x - x0, x1 - x);
-      return top(x) + Math.max(0, 40 - edge) * 1.2 + wob(x, x0) * 10;
-    }, () => H);
-    island(0, 470, () => 900);
-    island(590, 1010, () => 1020);
-    island(1120, 1690, x => x < 1430 ? 770 : x > 1490 ? 920 : 770 + (x - 1430) * 2.5);
-    island(1810, 2240, x => 650 + (x - 1810) * 0.12);
-    island(2350, 2560, () => 880);
-    addSolid(t, E, 0, 2560, x => 1340 + wob(x, 9) * 12, () => H);   // lake bed
+      return land(x) + Math.max(0, 24 - edge) * 1.5 + wob(x, 1) * 8;
+    }, () => H));
+    addSolid(t, E, 0, 4000, x => 1720 + wob(x, 9) * 10, () => H);   // lake bed
 
-    // Floating grass ledges
-    const ledge = (x, y, w) => addSolid(t, E, x, x + w, xx => y + wob(xx, x) * 3, xx => {
+    // Floating grass ledges — reachable with a qinggong leap (Q)
+    const ledge = (x, y, w) => addSolid(t, E, x, x + w, xx => y + wob(xx, x) * 2, xx => {
       const edge = Math.min(xx - x, x + w - xx);
-      return y + 16 + Math.min(22, edge * 0.6);
+      return y + 12 + Math.min(18, edge * 0.5);
     });
-    ledge(80, 600, 210); ledge(470, 790, 160); ledge(860, 570, 210); ledge(1240, 520, 170);
-    ledge(1550, 420, 200); ledge(2000, 450, 180); ledge(2330, 620, 190);
+    ledge(250, 1080, 180); ledge(950, 1050, 170); ledge(1200, 930, 170); ledge(1990, 700, 200);
+    ledge(2880, 960, 180); ledge(3180, 860, 160); ledge(3620, 1000, 200);
     normalise(t);
 
-    // Decorations sit on the ground at x (searching down from hintY)
-    const put = (type, x, hintY = 0) => { const y = groundBelow(t, x, hintY); if (y !== null) t.decor.push({ type, x, y }); };
-    [300, 760, 1230, 1600, 2120, 2470].forEach(x => put('bamboo', x, x === 1600 ? 700 : 0));
-    put('bamboo', 1000, 500);
-    [130, 420, 930, 1380, 1950, 2520].forEach(x => put('boulder', x));
-    put('pagoda', 1650, 400); put('pagoda', 180, 580);
-    [690, 1330, 2200, 2400].forEach(x => put('cherry', x));
-    put('torii', 1560, 800);
+    [150, 900, 1360, 2330, 2840, 3580, 3920].forEach(x => putDecor(t, 'bamboo', x, 1100));
+    [470, 1150, 1720, 2470, 3050, 3800].forEach(x => putDecor(t, 'boulder', x, 1100));
+    [800, 1300, 2760, 3330].forEach(x => putDecor(t, 'cherry', x, 1100));
+    putDecor(t, 'pagoda', 2090, 650); putDecor(t, 'pagoda', 3720, 950);
+    putDecor(t, 'bamboo', 330, 1000); putDecor(t, 'cherry', 1290, 900);
+    putDecor(t, 'torii', 3520, 1100);
 
-    t.spawns = [[220, 700], [2470, 700], [1300, 700], [790, 0], [2010, 600], [960, 500]];
+    t.spawns = [[180, 1150], [3830, 1150], [2050, 800], [1050, 1150], [2950, 1100], [1300, 1150]];
     return t;
   }
 
   function buildDragon() {
-    const t = blank(2560, 1440);
+    const t = blank(4000, 1800);
     t.bg = null;
     t.theme = 'cave';
-    t.liquid = { y: 1330, type: 'lava' };
+    t.liquid = { y: 1680, type: 'lava' };
     const R = MAT.ROCK, B = MAT.BONE, H = t.worldH;
 
     // Cave walls
-    addSolid(t, R, 0, 90, () => 0, x => H);
-    addSolid(t, R, 2470, 2560, () => 0, () => H);
+    addSolid(t, R, 0, 100, () => 0, () => H);
+    addSolid(t, R, 3900, 4000, () => 0, () => H);
 
-    // Ceiling with alcoves carved up into it, and stalactites hanging down
-    const pockets = [[170, 430], [750, 1010], [1410, 1670], [2010, 2270]];
-    const inPocket = x => pockets.some(([a, b]) => x >= a && x <= b);
-    addSolid(t, R, 90, 2470, () => 0, x => {
-      if (inPocket(x)) return 210 + wob(x, 3) * 12;
-      let y = 470 + wob(x, 5) * 14;
-      const sx = ((x % 115) + 115) % 115;                      // stalactite every 115px
-      y += Math.max(0, 70 - Math.abs(sx - 57) * 3.2);
+    // Ceiling with three alcoves cut up into it, stalactites elsewhere
+    const pockets = [[350, 650], [1500, 1800], [2700, 3000]];
+    const nearPocket = x => pockets.some(([a, b]) => x > a - 150 && x < b + 320);
+    addSolid(t, R, 100, 3900, () => 0, x => {
+      if (pockets.some(([a, b]) => x >= a && x <= b)) return 540 + wob(x, 3) * 10;
+      let y = 650 + wob(x, 5) * 12;
+      if (!nearPocket(x)) {
+        const k = ((x % 150) + 150) % 150;
+        y += Math.max(0, 55 - Math.abs(k - 75) * 3);
+      }
       return y;
     });
-    // Alcove floors — leave a gap on the right so you can drop out
-    pockets.forEach(([a, b]) => addSolid(t, R, a, b - 70, x => 430 + wob(x, a) * 3, x => 470 + Math.min(20, (b - 70 - x) * 0.5)));
-
-    // Rock outcrops in the open cavern for cover
-    const outcrop = (x0, x1, y) => addSolid(t, R, x0, x1, x => y + wob(x, x0) * 6, x => {
-      const u = (x - x0) / (x1 - x0);
-      return y + 30 + 60 * Math.sin(u * Math.PI);
+    // Alcove balconies stick out to the right; a rock outcrop below each lets you leap up
+    pockets.forEach(([a, b]) => {
+      addSolid(t, R, a, b + 140, x => 740 + wob(x, a) * 3, x => 772 + Math.min(16, (b + 140 - x) * 0.4));
+      addSolid(t, R, b + 160, b + 320, x => 1010 + wob(x, b) * 4, x => {
+        const u = (x - b - 160) / 160;
+        return 1040 + 50 * Math.sin(u * Math.PI);
+      });
     });
-    outcrop(560, 780, 760); outcrop(1160, 1420, 660); outcrop(1760, 1980, 760);
+    // Extra cover in the open
+    [[1150, 1300], [2350, 2500]].forEach(([a, b]) => addSolid(t, R, a, b, x => 1090 + wob(x, a) * 4, x => 1120 + 40 * Math.sin((x - a) / (b - a) * Math.PI)));
 
-    // The spine: walkable bone with vertebra spikes
-    const SPINE_TOP = 1000;
-    const spike = x => { const k = ((x - 170) % 170 + 170) % 170; return Math.max(0, 90 - Math.abs(k - 85 - 6) * 3.4); };
-    addSolid(t, B, 90, 2200, x => SPINE_TOP + wob(x, 7) * 6 - spike(x), () => 1070);
+    // The spine — walkable, with vertebra spikes you can hop over
+    const spike = x => { const k = ((x - 100) % 200 + 200) % 200; return Math.max(0, 38 - Math.abs(k - 100) * 1.7); };
+    addSolid(t, B, 100, 3150, x => 1250 + wob(x, 7) * 5 - spike(x), () => 1330);
 
-    // Ribs curling down underneath, over the lava
-    for (let cx = 250; cx < 2150; cx += 170) {
-      const len = 90;
-      const top = x => { const u = (cx - x) / len; return 1060 + 190 * Math.sin(Math.max(0, u) * Math.PI / 2); };
+    // Ribs curling down towards the lava
+    for (let cx = 260; cx < 3100; cx += 200) {
+      const len = 110;
+      const top = x => 1320 + 230 * Math.sin(Math.max(0, (cx - x) / len) * Math.PI / 2);
       addSolid(t, B, cx - len, cx + 4, top, x => {
         const slope = Math.abs(top(x + 2) - top(x - 2)) / 4;
-        return top(x) + 18 + Math.min(30, slope * COL * 1.5);
+        return top(x) + 20 + Math.min(30, slope * COL * 1.5);
       });
     }
 
-    // Skull at the right, with horn and jaw
-    const SX = 2320, SY = 1010;
-    addSolid(t, B, SX - 150, SX + 150, x => {
-      const u = (x - SX) / 150;
-      const horn = Math.max(0, 130 - Math.abs(x - (SX - 70)) * 4.5);
-      return SY - 140 * Math.sqrt(Math.max(0, 1 - u * u)) - horn;
-    }, x => SY + 70 * Math.sqrt(Math.max(0, 1 - ((x - SX) / 150) ** 2)));
-    addSolid(t, B, SX + 60, 2470, () => 1055, x => 1095);
+    // Dragon skull: cranium with swept-back horn, long snout, open jaw
+    const CX = 3450, CY = 1230;
+    const cranium = x => { const u = (x - CX) / 190; return Math.sqrt(Math.max(0, 1 - u * u)); };
+    addSolid(t, B, 3100, 3300, x => 1250 - (x - 3100) * 0.75 + wob(x, 2) * 3, () => 1330);       // neck ramp
+    addSolid(t, B, CX - 190, CX + 190, x => CY - 210 * cranium(x), x => CY + 100 * cranium(x));
+    addSolid(t, B, 3362, 3530, x => x < 3400 ? 880 + (3400 - x) * 4 : 880 + (x - 3400) * 1.3, () => 1120); // horn
+    addSolid(t, B, 3560, 3880, x => {
+      const brow = Math.max(0, 30 - Math.abs(x - 3590) * 0.8);
+      return 1150 + (x - 3560) * 0.18 - brow + wob(x, 4) * 3;
+    }, x => 1285 - Math.max(0, x - 3820) * 0.6);                                                   // snout
+    addSolid(t, B, 3520, 3850, x => 1322 + (x - 3520) * 0.02, x => 1362 - Math.max(0, x - 3800) * 0.4); // lower jaw
     normalise(t);
 
-    t.decor.push({ type: 'eye', x: SX + 30, y: SY - 40 });
-    t.decor.push({ type: 'teeth', x: SX + 70, y: 1095, w: 2470 - SX - 80 });
+    t.decor.push({ type: 'eye', x: CX + 40, y: CY - 70 });
+    t.decor.push({ type: 'teeth', x: 3580, y: 1285, w: 240 });
+    t.decor.push({ type: 'nostril', x: 3845, y: 1215 });
 
-    t.spawns = [[260, 300], [2100, 300], [1500, 300], [840, 300], [516, 800], [1876, 800]];
+    t.spawns = [[400, 1200], [3700, 1100], [1650, 700], [2600, 1200], [500, 700], [2850, 700]];
     return t;
   }
 

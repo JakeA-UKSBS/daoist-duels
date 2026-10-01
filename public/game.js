@@ -27,7 +27,7 @@ let moveInterval = null;
 let projAnim = null;
 
 // ── Art ───────────────────────────────────────────────────────────────────────
-const PLAYER_H = 64;   // sprite height in world px; body centre is PLAYER_H/2 above feet
+const PLAYER_H = 40;   // sprite height in world px; body centre is PLAYER_H/2 above feet
 const CHAR_SPRITES = ['cultivator', 'sage', 'geisha', 'lucky_cat'].map(n => {
   const img = new Image();
   img.src = `/assets/characters/${n}.png`;
@@ -209,6 +209,7 @@ socket.on('error', (msg) => alert(msg));
 
 // ── Enter game ────────────────────────────────────────────────────────────────
 function enterGame() {
+  cam.zoom = 1.2;
   lobbyEl.style.display = 'none';
   gameEl.style.display = 'block';
   hudEl.style.display = 'flex';
@@ -252,10 +253,11 @@ window.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft'  || e.key === 'a') startMoving(-1);
   if (e.key === 'ArrowRight' || e.key === 'd') startMoving(1);
   if (e.key === ' ') { e.preventDefault(); fireSpell(); }
-  if (e.key === 'ArrowUp' || e.key === 'w') {
+  const jumpKind = (e.key === 'ArrowUp' || e.key === 'w') ? 'hop' : (e.key === 'q' || e.key === 'ArrowDown') ? 'leap' : null;
+  if (jumpKind) {
     e.preventDefault();
     const me = myPlayer();
-    if (me && !me.jump) { stopMoving(); socket.emit('jump'); }
+    if (me && !me.jump) { stopMoving(); socket.emit('jump', { kind: jumpKind }); }
   }
 });
 
@@ -465,7 +467,7 @@ function render() {
     ctx.fillStyle = 'rgba(240,208,128,0.7)';
     ctx.font = '13px Georgia';
     ctx.textAlign = 'left';
-    ctx.fillText('A/D to walk  ·  W to jump  ·  Move mouse to aim  ·  Click to fire  ·  Right-drag to pan  ·  Wheel to zoom', 12, canvas.height - 12);
+    ctx.fillText('A/D walk  ·  W hop  ·  Q qinggong leap  ·  Move mouse to aim  ·  Click to fire  ·  Right-drag to pan  ·  Wheel to zoom', 12, canvas.height - 12);
   }
 }
 
@@ -528,7 +530,7 @@ function buildTerrainCache() {
 
   // Decorations — only where the ground under them still exists
   t.decor.forEach(d => {
-    const probe = d.type === 'teeth' ? d.y - 3 : d.type === 'eye' ? d.y : d.y + 3;
+    const probe = d.type === 'teeth' ? d.y - 3 : (d.type === 'eye' || d.type === 'nostril') ? d.y : d.y + 3;
     if (Terrain.isSolid(t, d.x, probe)) drawDecor(g, d);
   });
 }
@@ -590,9 +592,11 @@ function drawDecor(g, d) {
       const eg = g.createRadialGradient(x, y, 0, x, y, 16);
       eg.addColorStop(0, 'rgba(255,90,20,0.9)'); eg.addColorStop(1, 'rgba(255,40,0,0)');
       g.fillStyle = eg; g.beginPath(); g.arc(x, y, 16, 0, Math.PI * 2); g.fill();
-      g.fillStyle = '#1a0f08'; g.beginPath(); g.ellipse(x - 70, y + 50, 10, 16, 0.3, 0, Math.PI * 2); g.fill();
       break;
     }
+    case 'nostril':
+      g.fillStyle = '#1a0f08'; g.beginPath(); g.ellipse(x, y, 9, 5, -0.3, 0, Math.PI * 2); g.fill();
+      break;
     case 'teeth':
       g.fillStyle = '#efe6b8'; g.strokeStyle = '#6e6438'; g.lineWidth = 1.5;
       for (let tx = x; tx < x + d.w; tx += 18) {
@@ -742,7 +746,7 @@ function drawAimIndicator(me) {
 
   // Simulated arc (dotted) using same physics as server
   const sp = room.spells?.[selectedSpell] || { speed: 1, gravity: 1 };
-  const speed = aimPower * 12 * sp.speed;
+  const speed = aimPower * 14 * sp.speed;
   const GRAVITY = 600 * sp.gravity;
   const dt = 1 / 60;
   let px = startX, py = startY;

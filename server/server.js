@@ -15,7 +15,7 @@ app.use(express.static(path.join(__dirname, '../public')));
 // ─── Game constants ───────────────────────────────────────────────────────────
 const GRAVITY  = 600;   // px / s²
 const MAX_PLAYERS = 6;
-const PLAYER_H = 64;    // sprite height; body centre is PLAYER_H/2 above feet
+const PLAYER_H = 40;    // sprite height; body centre is PLAYER_H/2 above feet
 
 // ─── Maps / terrain (shared with the browser) ─────────────────────────────────
 const Terrain = require('../public/terrain.js');
@@ -23,10 +23,10 @@ const Terrain = require('../public/terrain.js');
 // ─── Spells ───────────────────────────────────────────────────────────────────
 // gravity/speed are multipliers; carve = how deep the crater is; knockback in px
 const SPELLS = {
-  dragon_blast:   { label: 'Dragon Blast',   color: '#ff6020', radius: 90,  damage: 40, gravity: 1.0,  speed: 1.0, carve: 0.8, knockback: 40 },
-  tidal_wave:     { label: 'Tidal Wave',     color: '#40a0ff', radius: 130, damage: 25, gravity: 1.5,  speed: 1.15, carve: 0.3, knockback: 140 },
-  thunder_strike: { label: 'Thunder Strike', color: '#ffe040', radius: 45,  damage: 35, gravity: 0.15, speed: 1.4, carve: 0.4, knockback: 0 },
-  wind_slash:     { label: 'Wind Slash',     color: '#80ffa0', radius: 60,  damage: 20, gravity: 0.45, speed: 0.9, carve: 0.2, knockback: 220 },
+  dragon_blast:   { label: 'Dragon Blast',   color: '#ff6020', radius: 70,  damage: 40, gravity: 1.0,  speed: 1.0, carve: 0.8, knockback: 40 },
+  tidal_wave:     { label: 'Tidal Wave',     color: '#40a0ff', radius: 100, damage: 25, gravity: 1.5,  speed: 1.15, carve: 0.3, knockback: 140 },
+  thunder_strike: { label: 'Thunder Strike', color: '#ffe040', radius: 35,  damage: 35, gravity: 0.15, speed: 1.4, carve: 0.4, knockback: 0 },
+  wind_slash:     { label: 'Wind Slash',     color: '#80ffa0', radius: 50,  damage: 20, gravity: 0.45, speed: 0.9, carve: 0.2, knockback: 200 },
 };
 
 // ─── Game state ───────────────────────────────────────────────────────────────
@@ -217,12 +217,12 @@ io.on('connection', (socket) => {
     if (fell) endTurn(room);
   });
 
-  socket.on('jump', () => {
+  socket.on('jump', ({ kind } = {}) => {
     const room = rooms[socket.data.roomId];
     if (!room || room.phase !== 'playing') return;
     const cp = room.currentPlayer();
     if (!cp || cp.id !== socket.id) return;
-    const { path, alive } = Terrain.jump(room.terrain, cp);
+    const { path, alive } = Terrain.jump(room.terrain, cp, kind === 'leap' ? 'leap' : 'hop');
     if (!alive) cp.hp = 0;
     io.to(room.id).emit('player_jumped', { id: cp.id, path, x: cp.x, y: cp.y, facing: cp.facing, hp: cp.hp });
     if (!alive) endTurn(room, path.length / 60 * 1000);
@@ -245,7 +245,7 @@ function doFire(room, cp, spell, angle, power) {
 
   const sp = SPELLS[spell] || SPELLS.dragon_blast;
   const angleRad = (cp.angle * Math.PI) / 180;
-  const speed = cp.power * 12 * sp.speed;
+  const speed = cp.power * 14 * sp.speed;
   cp.facing = Math.cos(angleRad) >= 0 ? 1 : -1;
   const proj = {
     x: cp.x,
@@ -334,7 +334,7 @@ function simulateProjectile(proj, room, ownerId) {
 
     // Direct hit on a player's body (ignore the caster for the first moments)
     const hit = room.players.some(p => p.hp > 0 && (p.id !== ownerId || i > 30) &&
-      Math.abs(p.x - x) < 18 && Math.abs((p.y - PLAYER_H / 2) - y) < PLAYER_H / 2);
+      Math.abs(p.x - x) < 12 && Math.abs((p.y - PLAYER_H / 2) - y) < PLAYER_H / 2);
     if (hit) break;
   }
   path.push({ x: Math.round(x), y: Math.round(y) });
